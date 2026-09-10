@@ -41,36 +41,30 @@ jobs:
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+            -w "\n=== HTTP Status: %{http_code} ===\n"
 
           echo ""
           echo "=== File Info ==="
           ls -lh project.zip
-          echo ""
-          echo "=== File Type ==="
           file project.zip
-          echo ""
-          echo "=== First Bytes ==="
-          xxd project.zip | head -2
 
       - name: Extract ZIP
         run: |
           echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "❌ File bukan ZIP valid!"
-            echo ""
-            echo "=== Isi file ==="
             cat project.zip
             exit 1
           fi
           echo "✅ ZIP valid"
 
-          echo ""
-          echo "=== Extracting ZIP ==="
+          echo "=== Extracting ==="
           unzip -q project.zip -d project_raw
 
+          echo "=== Struktur project_raw ==="
+          ls -la project_raw/
           echo ""
-          echo "=== Mengunci Project Dir ==="
+          
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
           
@@ -80,6 +74,18 @@ jobs:
             PROJECT_DIR="project_raw"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Locked PROJECT_DIR: $PROJECT_DIR"
+          
+          if [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml TIDAK DITEMUKAN di $PROJECT_DIR!"
+            echo "=== Isi folder $PROJECT_DIR ==="
+            ls -la "$PROJECT_DIR/"
+            echo ""
+            echo "=== Cari pubspec.yaml di mana saja ==="
+            find project_raw -name "pubspec.yaml"
+            exit 1
+          fi
+          echo "✅ pubspec.yaml ditemukan"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -94,20 +100,36 @@ jobs:
           channel: "stable"
           cache: true
 
+      - name: Verify Project Structure
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "=== Current DIR ==="
+          pwd
+          echo ""
+          echo "=== Files in project ==="
+          ls -la
+          echo ""
+          echo "=== Check Android folder ==="
+          if [ -d "android" ]; then
+            echo "✅ Folder android ADA"
+            ls -la android/ | head -20
+            if [ -f "android/gradlew" ]; then
+              echo "✅ gradlew ADA"
+            else
+              echo "⚠️ gradlew TIDAK ADA (akan di-fix nanti)"
+            fi
+          else
+            echo "⚠️ Folder android TIDAK ADA (akan di-generate nanti)"
+          fi
+
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            flutter analyze > analyze_report.txt 2>&1 || true
-            echo "[RESULT_ANALYZE]"
-            cat analyze_report.txt
-            echo "[END_RESULT_ANALYZE]"
-            rm -f analyze_report.txt
-          else
-            echo "[RESULT_ANALYZE]"
-            echo "❌ pubspec.yaml tidak ditemukan."
-            echo "[END_RESULT_ANALYZE]"
-          fi
+          flutter analyze > analyze_report.txt 2>&1 || true
+          echo "[RESULT_ANALYZE]"
+          cat analyze_report.txt
+          echo "[END_RESULT_ANALYZE]"
+          rm -f analyze_report.txt
 
       - name: Stop if Analyze Only
         if: ${{ github.event.inputs.only_analyze == 'true' }}
@@ -116,37 +138,75 @@ jobs:
       - name: Get dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            timeout 120s flutter pub get || echo "⚠️ Lanjut..."
+          timeout 180s flutter pub get || echo "⚠️ Pub get timeout, lanjut..."
+          echo "=== Pub get done ==="
+
+      - name: Ensure Android Folder Exists
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -d "android" ]; then
+            echo "⚠️ Folder android TIDAK ADA, membuat ulang..."
+            flutter create --platforms=android .
+            echo "✅ Folder android berhasil dibuat"
+          else
+            echo "✅ Folder android sudah ada"
+          fi
+          
+          if [ -f "android/gradlew" ]; then
+            chmod +x android/gradlew
+            echo "✅ gradlew sudah executable"
+          else
+            echo "⚠️ gradlew masih tidak ada, coba regenerate..."
+            cd android 2>/dev/null && gradle wrapper 2>/dev/null || echo "skip gradle wrapper"
+            cd ..
+            if [ -f "android/gradlew" ]; then
+              chmod +x android/gradlew
+              echo "✅ gradlew berhasil dibuat"
+            fi
           fi
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            flutter build apk --${{ github.event.inputs.build_type }}
-          else
-            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            GRADLE_DIR=$(dirname "$GRADLE_PATH")
-            cd "$GRADLE_DIR" && chmod +x gradlew
-            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              ./gradlew assembleDebug
-            else
-              ./gradlew assembleRelease
-            fi
+          echo "=== Building APK (type: ${{ github.event.inputs.build_type }}) ==="
+          
+          if [ ! -d "android" ]; then
+            echo "❌ Folder android masih tidak ada!"
+            exit 1
           fi
+          
+          if [ -f "android/gradlew" ]; then
+            chmod +x android/gradlew
+          fi
+          
+          flutter build apk --${{ github.event.inputs.build_type }}
+          
+          echo "=== Build done ==="
 
       - name: Check APK Output
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
-          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "=== Mencari APK ==="
+          APK_FOUND=$(find . -name "*.apk" -type f | head -n 1)
+          
+          if [ -z "$APK_FOUND" ]; then
+            echo "❌ APK TIDAK DITEMUKAN!"
+            find . -type d -name "outputs" 2>/dev/null
+            find . -type d -name "flutter-apk" 2>/dev/null
+            exit 1
+          fi
+          
+          echo "✅ APK found: $APK_FOUND"
+          ls -lh "$APK_FOUND"
+          
+          APK_REL=$(echo "$APK_FOUND" | sed "s|^\./||")
+          echo "APK_REL_PATH=$APK_REL" >> $GITHUB_ENV
+          echo "APK_FULL_PATH=$(pwd)/$APK_REL" >> $GITHUB_ENV
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
-          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          path: ${{ env.APK_FULL_PATH }}
           retention-days: 1
           if-no-files-found: error
