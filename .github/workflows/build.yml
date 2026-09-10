@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-    
+
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -57,13 +57,13 @@ jobs:
         run: |
           echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "❌ File bukan ZIP valid!"
+            echo "File bukan ZIP valid!"
             echo ""
             echo "=== Isi file ==="
             cat project.zip
             exit 1
           fi
-          echo "✅ ZIP valid"
+          echo "ZIP valid"
 
           echo ""
           echo "=== Extracting ZIP ==="
@@ -73,7 +73,7 @@ jobs:
           echo "=== Mengunci Project Dir ==="
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
-          
+
           if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
             PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
           else
@@ -105,7 +105,7 @@ jobs:
             rm -f analyze_report.txt
           else
             echo "[RESULT_ANALYZE]"
-            echo "❌ pubspec.yaml tidak ditemukan."
+            echo "pubspec.yaml tidak ditemukan."
             echo "[END_RESULT_ANALYZE]"
           fi
 
@@ -117,7 +117,7 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            timeout 120s flutter pub get || echo "⚠️ Lanjut..."
+            timeout 120s flutter pub get || echo "Lanjut..."
           fi
 
       - name: Build APK
