@@ -46,31 +46,16 @@ jobs:
           echo ""
           echo "=== File Info ==="
           ls -lh project.zip
-          echo ""
-          echo "=== File Type ==="
-          file project.zip
-          echo ""
-          echo "=== First Bytes ==="
-          xxd project.zip | head -2
 
       - name: Extract ZIP
         run: |
           echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "File bukan ZIP valid!"
-            echo ""
-            echo "=== Isi file ==="
-            cat project.zip
             exit 1
           fi
-          echo "ZIP valid"
-
-          echo ""
-          echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
 
-          echo ""
-          echo "=== Mengunci Project Dir ==="
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
 
