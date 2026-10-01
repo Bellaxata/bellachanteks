@@ -1,0 +1,196 @@
+name: Protect .so
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "URL download APK"
+        required: true
+      tag:
+        description: "Tag build"
+        required: true
+
+jobs:
+  protect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          npm install adm-zip
+
+      - name: Download APK
+        run: |
+          echo "=== Downloading APK ==="
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.apk_url }}" \
+            -o input.apk \
+            -w "\n=== HTTP Status: %{http_code} ===\n"
+
+          echo ""
+          ls -lh input.apk
+          file input.apk
+
+      - name: Protect .so files
+        run: |
+          cat > protect.js << 'PROTECT_SCRIPT'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const AdmZip = require("adm-zip");
+
+          const URL_REGEX = /\b(https?:\/\/[^\s"'<>()\[\]{}\\,;|`]+|wss?:\/\/[^\s"'<>()\[\]{}\\,;|`]+|ftps?:\/\/[^\s"'<>()\[\]{}\\,;|`]+)/gi;
+
+          function extractStringsFromBuffer(buffer, minLen = 6) {
+            const strings = [];
+            let current = [];
+            for (let i = 0; i < buffer.length; i++) {
+              const b = buffer[i];
+              if ((b >= 32 && b <= 126) || b === 9) {
+                current.push(b);
+              } else {
+                if (current.length >= minLen) strings.push(Buffer.from(current).toString("utf8"));
+                current = [];
+              }
+            }
+            if (current.length >= minLen) strings.push(Buffer.from(current).toString("utf8"));
+            return strings;
+          }
+
+          function generateNoise(length = 256) {
+            const noise = Buffer.alloc(length);
+            for (let i = 0; i < length; i++) {
+              let b = crypto.randomBytes(1)[0];
+              if (b === 0) b = 1;
+              noise[i] = b;
+            }
+            return noise;
+          }
+
+          function obfuscateUrlsInBuffer(buffer) {
+            const stats = { urlsFound: 0, urlsObfuscated: 0, bytesChanged: 0 };
+            const buf = Buffer.from(buffer);
+            const text = buf.toString("latin1");
+            const matches = [...text.matchAll(URL_REGEX)];
+
+            if (matches.length === 0) return { buffer: buf, stats };
+
+            stats.urlsFound = matches.length;
+
+            for (const m of matches) {
+              const url = m[0];
+              const start = m.index;
+              const len = url.length;
+
+              for (let i = 0; i < len; i++) {
+                if (i === 0) {
+                  buf[start + i] = 0x00;
+                } else {
+                  let b = crypto.randomBytes(1)[0];
+                  if (b < 0x20 || b === 0x7f) b = 0x41 + (b % 26);
+                  buf[start + i] = b;
+                }
+              }
+              stats.urlsObfuscated++;
+              stats.bytesChanged += len;
+            }
+            return { buffer: buf, stats };
+          }
+
+          function injectNoiseToSo(buffer) {
+            const noise = generateNoise(1024);
+            return Buffer.concat([buffer, noise]);
+          }
+
+          function protectSoBuffer(buffer) {
+            const { buffer: obfuscated, stats } = obfuscateUrlsInBuffer(buffer);
+            const withNoise = injectNoiseToSo(obfuscated);
+            return { buffer: withNoise, stats };
+          }
+
+          const apkPath = "input.apk";
+          const outPath = "protected.apk";
+          const zip = new AdmZip(apkPath);
+          const entries = zip.getEntries();
+
+          let totalSoFiles = 0;
+          let protectedSoFiles = 0;
+          let skippedSoFiles = 0;
+          let totalUrlsFound = 0;
+          let totalUrlsObfuscated = 0;
+          let totalBytesChanged = 0;
+          const details = [];
+
+          for (const entry of entries) {
+            if (entry.isDirectory) continue;
+            const lower = entry.entryName.toLowerCase();
+            if (!lower.endsWith(".so")) continue;
+
+            totalSoFiles++;
+
+            try {
+              const buf = entry.getData();
+              const { buffer: protectedBuf, stats } = protectSoBuffer(buf);
+
+              if (stats.urlsFound === 0) {
+                skippedSoFiles++;
+                details.push({ file: entry.entryName, urlsFound: 0, status: "skipped" });
+                continue;
+              }
+
+              zip.updateFile(entry.entryName, protectedBuf);
+              protectedSoFiles++;
+              totalUrlsFound += stats.urlsFound;
+              totalUrlsObfuscated += stats.urlsObfuscated;
+              totalBytesChanged += stats.bytesChanged;
+
+              details.push({
+                file: entry.entryName,
+                urlsFound: stats.urlsFound,
+                status: "protected",
+              });
+            } catch (e) {
+              details.push({ file: entry.entryName, error: e.message, status: "error" });
+            }
+          }
+
+          zip.writeZip(outPath);
+
+          console.log("[PROTECT_RESULT]");
+          console.log("TOTAL_SO_FILES=" + totalSoFiles);
+          console.log("PROTECTED_SO_FILES=" + protectedSoFiles);
+          console.log("SKIPPED_SO_FILES=" + skippedSoFiles);
+          console.log("TOTAL_URLS_FOUND=" + totalUrlsFound);
+          console.log("TOTAL_URLS_OBFUSCATED=" + totalUrlsObfuscated);
+          console.log("TOTAL_BYTES_CHANGED=" + totalBytesChanged);
+          console.log(JSON.stringify({
+            totalSoFiles,
+            protectedSoFiles,
+            skippedSoFiles,
+            totalUrlsFound,
+            totalUrlsObfuscated,
+            totalBytesChanged,
+            details: details.slice(0, 50),
+          }, null, 2));
+          console.log("[END_PROTECT_RESULT]");
+          PROTECT_SCRIPT
+
+          node protect.js
+
+      - name: Upload Protected APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: protected-apk-${{ github.event.inputs.tag }}
+          path: protected.apk
+          retention-days: 1
+          if-no-files-found: error
