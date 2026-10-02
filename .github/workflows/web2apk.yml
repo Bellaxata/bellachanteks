@@ -204,9 +204,7 @@ jobs:
 
       - name: Inject ProGuard Protection
         run: |
-          echo "==============================================="
           echo "PROGUARD PROTECTION INJECTOR AKTIF (Web2APK)"
-          echo "==============================================="
 
           ANDROID_APP="myapp/android/app"
 
@@ -215,33 +213,26 @@ jobs:
           -keep class io.flutter.plugins.** { *; }
           -keep class io.flutter.plugin.** { *; }
           -keep class io.flutter.embedding.** { *; }
-
           -keepattributes Signature
           -keepattributes *Annotation*
           -keepattributes InnerClasses
           -keepattributes EnclosingMethod
           -keepattributes SourceFile,LineNumberTable
           -renamesourcefileattribute SourceFile
-
           -keep class androidx.webkit.** { *; }
           -keep class android.webkit.** { *; }
           -keepclassmembers class * extends android.webkit.WebViewClient { *; }
           -keepclassmembers class * extends android.webkit.WebChromeClient { *; }
-
           -keep class dev.fluttercommunity.plus.connectivity.** { *; }
-
           -keep class androidx.lifecycle.** { *; }
           -keep class * extends androidx.lifecycle.LifecycleObserver { *; }
           -keep class * extends androidx.lifecycle.ViewModel { *; }
-
           -keep class kotlin.** { *; }
           -dontwarn kotlin.**
-
           -keepclasseswithmembernames class * { native <methods>; }
           -keep class * implements android.os.Parcelable {
               public static final android.os.Parcelable$Creator *;
           }
-
           -dontwarn io.flutter.**
           -dontwarn androidx.**
           -dontwarn kotlin.**
@@ -251,8 +242,9 @@ jobs:
           sed -i 's/^          //' "$ANDROID_APP/proguard-rules.pro"
           echo "proguard-rules.pro dibuat"
 
-          GRADLE_FILE="myapp/android/app/build.gradle"
-          GRADLE_FILE="$GRADLE_FILE" python3 << 'PYEOF'
+          export GRADLE_FILE="myapp/android/app/build.gradle"
+
+          python3 << 'PYEOF'
 import re, os
 
 path = os.environ.get("GRADLE_FILE", "myapp/android/app/build.gradle")
@@ -269,14 +261,17 @@ inject = """
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 """
 
-pattern = re.compile(r"(buildTypes\s*\{[\s\S]*?release\s*\{)([\s\S]*?)(\n\s*\})", re.MULTILINE)
+pattern = re.compile(r"(buildTypess*{[sS]*?releases*{)([sS]*?)(
+s*})", re.MULTILINE)
 m = pattern.search(content)
 
 if m:
     start, body, end = m.group(1), m.group(2), m.group(3)
-    body = re.sub(r"\s*minifyEnabled\s+\w+", "", body)
-    body = re.sub(r"\s*shrinkResources\s+\w+", "", body)
-    body = re.sub(r"\s*proguardFiles[\s\S]*?(?=\n\s*\w|\n\s*\})", "", body)
+    body = re.sub(r"s*minifyEnableds+w+", "", body)
+    body = re.sub(r"s*shrinkResourcess+w+", "", body)
+    body = re.sub(r"s*proguardFiles[sS]*?(?=
+s*w|
+s*})", "", body)
     content = content[:m.start()] + start + inject + body + end + content[m.end():]
     with open(path, "w") as f:
         f.write(content)
