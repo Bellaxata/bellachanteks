@@ -43,7 +43,6 @@ jobs:
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip
-
           ls -lh project.zip
 
       - name: Extract ZIP
@@ -65,7 +64,7 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
       # ═══════════════════════════════════════════════════════════════════════
-      # AMANKAN LINK — Split URL jadi beberapa bagian
+      # AMANKAN LINK — Split URL + Auto-replace (FIXED)
       # ═══════════════════════════════════════════════════════════════════════
       - name: Amankan Link
         if: ${{ github.event.inputs.obfuscate_so == 'true' }}
@@ -75,6 +74,7 @@ jobs:
           const fs = require("fs");
           const path = require("path");
 
+          // Regex URL — cari di dalam string quotes
           const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
 
           function splitUrl(url) {
@@ -91,13 +91,16 @@ jobs:
           let counter = 0;
           const urlMap = {};
 
+          // Proses 1 file .dart: split URL, simpan mapping, tulis ulang file
           function processDartFile(filePath) {
             let content = fs.readFileSync(filePath, "utf8");
             const matches = [...content.matchAll(URL_REGEX)];
-            if (matches.length === 0) return 0;
+            if (matches.length === 0) return { processed: 0, changed: false };
 
             let processed = 0;
 
+            // Replace URL dengan marker unik yang nanti akan kita ganti
+            // pakai Node.js (bukan sed) biar aman
             content = content.replace(URL_REGEX, (match, quote, url) => {
               const parts = splitUrl(url);
               if (!parts) return match;
@@ -107,13 +110,15 @@ jobs:
               urlMap[varName] = parts;
 
               processed++;
-              return quote + "XSPLITX" + varName + "XENDX" + quote;
+              // Buat marker unik yang aman dari regex
+              return "XSPLITX" + varName + "XENDX";
             });
 
             if (processed > 0) {
               fs.writeFileSync(filePath, content, "utf8");
+              return { processed, changed: true };
             }
-            return processed;
+            return { processed: 0, changed: false };
           }
 
           function walkDir(dir, results) {
@@ -144,18 +149,49 @@ jobs:
           let changedFiles = 0;
           let totalUrls = 0;
 
+          // PASS 1: Ganti URL jadi marker
           for (const file of dartFiles) {
             try {
-              const count = processDartFile(file);
-              if (count > 0) {
+              const result = processDartFile(file);
+              if (result.changed) {
                 changedFiles++;
-                totalUrls += count;
+                totalUrls += result.processed;
               }
             } catch (e) {
               console.log("[PROTECT] Error " + file + ": " + e.message);
             }
           }
 
+          // PASS 2: Ganti marker jadi u('__vN') + tambah import
+          const filesToImport = [];
+
+          for (const file of dartFiles) {
+            try {
+              let content = fs.readFileSync(file, "utf8");
+              if (!content.includes("XSPLITX")) continue;
+
+              // Replace XSPLITX__vN XENDX jadi u('__vN')
+              content = content.replace(/XSPLITX([a-zA-Z0-9_]+)XENDX/g, (_, name) => {
+                return "u('" + name + "')";
+              });
+
+              // Tambah import link_resolver.dart kalau belum ada
+              if (!content.includes("link_resolver.dart")) {
+                const importRegex = /^import\s+.*?;$/m;
+                if (importRegex.test(content)) {
+                  content = content.replace(importRegex, (m) => m + "\nimport 'link_resolver.dart';");
+                } else {
+                  content = "import 'link_resolver.dart';\n" + content;
+                }
+              }
+
+              fs.writeFileSync(file, content, "utf8");
+            } catch (e) {
+              console.log("[PROTECT] Error replace " + file + ": " + e.message);
+            }
+          }
+
+          // Buat file resolver
           const helperLines = [];
           helperLines.push("// Auto-generated - URL resolver");
           helperLines.push("// Created by XATANICVXII Protect System");
@@ -183,23 +219,13 @@ jobs:
 
           node protect-link.js "$PROJECT_DIR"
 
-          echo "=== Applying replacement ==="
-          find "$PROJECT_DIR/lib" -name "*.dart" -type f -exec sh -c '
-            for f; do
-              if grep -q "XSPLITX" "$f"; then
-                sed -i "s/XSPLITX\([a-zA-Z0-9_]*\)XENDX/u(\x27\1\x27)/g" "$f"
-              fi
-            done
-          ' _ {} +
-
-          echo "=== Adding imports ==="
-          find "$PROJECT_DIR/lib" -name "*.dart" -type f -exec sh -c '
-            for f; do
-              if grep -q "u(\x27" "$f" && ! grep -q "link_resolver.dart" "$f" && [ "$(basename $f)" != "link_resolver.dart" ]; then
-                sed -i "1i import 'link_resolver.dart';" "$f"
-              fi
-            done
-          ' _ {} +
+          echo "=== Verify result ==="
+          if [ -f "$PROJECT_DIR/lib/link_resolver.dart" ]; then
+            echo "✅ link_resolver.dart created"
+            head -5 "$PROJECT_DIR/lib/link_resolver.dart"
+          else
+            echo "❌ link_resolver.dart NOT created"
+          fi
 
           echo "=== Protection done ==="
 
