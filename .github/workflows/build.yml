@@ -122,12 +122,8 @@ jobs:
 
       - name: Inject ProGuard Protection
         working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          GRADLE_FILE_ENV: ${{ env.PROJECT_DIR }}/android/app/build.gradle
         run: |
-          echo "==============================================="
           echo "PROGUARD PROTECTION INJECTOR AKTIF"
-          echo "==============================================="
           echo ""
 
           if [ ! -f "pubspec.yaml" ]; then
@@ -158,55 +154,40 @@ jobs:
           PROGUARD_FILE="$ANDROID_APP/proguard-rules.pro"
 
           cat > "$PROGUARD_FILE" << 'PROGUARD_EOF'
-          # ============================================
-          # ProGuard/R8 Rules - Auto-generated
-          # ============================================
-
           -keep class io.flutter.** { *; }
           -keep class io.flutter.plugins.** { *; }
           -keep class io.flutter.plugin.** { *; }
           -keep class io.flutter.embedding.** { *; }
-
           -keepattributes Signature
           -keepattributes *Annotation*
           -keepattributes InnerClasses
           -keepattributes EnclosingMethod
           -keepattributes SourceFile,LineNumberTable
           -renamesourcefileattribute SourceFile
-
           -keep class androidx.webkit.** { *; }
           -keep class android.webkit.** { *; }
           -keepclassmembers class * extends android.webkit.WebViewClient { *; }
           -keepclassmembers class * extends android.webkit.WebChromeClient { *; }
-
           -keep class com.google.android.gms.** { *; }
           -dontwarn com.google.android.gms.**
-
           -keep class dev.fluttercommunity.plus.connectivity.** { *; }
-
           -keep class androidx.lifecycle.** { *; }
           -keep class * extends androidx.lifecycle.LifecycleObserver { *; }
           -keep class * extends androidx.lifecycle.ViewModel { *; }
-
           -keep class androidx.core.** { *; }
           -keep class androidx.annotation.** { *; }
-
           -keep class kotlin.** { *; }
           -keep class kotlinx.coroutines.** { *; }
           -dontwarn kotlin.**
           -dontwarn kotlinx.**
-
           -keepclasseswithmembernames class * { native <methods>; }
-
           -keep class * implements android.os.Parcelable {
               public static final android.os.Parcelable$Creator *;
           }
-
           -keepclassmembers enum * {
               public static **[] values();
               public static ** valueOf(java.lang.String);
           }
-
           -dontwarn io.flutter.**
           -dontwarn androidx.**
           -dontwarn org.jetbrains.**
@@ -234,8 +215,10 @@ jobs:
           fi
 
           echo "Editing: $GRADLE_FILE (kts=$IS_KTS)"
+          export GRADLE_FILE
+          export IS_KTS
 
-          GRADLE_FILE="$GRADLE_FILE" IS_KTS="$IS_KTS" python3 << 'PYEOF'
+          python3 << 'PYEOF'
 import re, os, sys
 
 gradle_file = os.environ.get("GRADLE_FILE")
@@ -265,7 +248,8 @@ else:
 """
 
 pattern = re.compile(
-    r"(buildTypes\s*\{[\s\S]*?release\s*\{)([\s\S]*?)(\n\s*\})",
+    r"(buildTypess*{[sS]*?releases*{)([sS]*?)(
+s*})",
     re.MULTILINE
 )
 
@@ -275,13 +259,15 @@ if match:
     start, body, end = match.group(1), match.group(2), match.group(3)
 
     if is_kts:
-        body = re.sub(r"\s*isMinifyEnabled\s*=\s*\w+", "", body)
-        body = re.sub(r"\s*isShrinkResources\s*=\s*\w+", "", body)
-        body = re.sub(r"\s*proguardFiles\s*\([\s\S]*?\)", "", body)
+        body = re.sub(r"s*isMinifyEnableds*=s*w+", "", body)
+        body = re.sub(r"s*isShrinkResourcess*=s*w+", "", body)
+        body = re.sub(r"s*proguardFiless*([sS]*?)", "", body)
     else:
-        body = re.sub(r"\s*minifyEnabled\s+\w+", "", body)
-        body = re.sub(r"\s*shrinkResources\s+\w+", "", body)
-        body = re.sub(r"\s*proguardFiles[\s\S]*?(?=\n\s*\w|\n\s*\})", "", body)
+        body = re.sub(r"s*minifyEnableds+w+", "", body)
+        body = re.sub(r"s*shrinkResourcess+w+", "", body)
+        body = re.sub(r"s*proguardFiles[sS]*?(?=
+s*w|
+s*})", "", body)
 
     new_content = content[:match.start()] + start + inject + body + end + content[match.end():]
 
@@ -292,7 +278,7 @@ if match:
 else:
     print("buildTypes/release tidak ditemukan, coba fallback...")
 
-    android_pattern = re.compile(r"(android\s*\{)", re.MULTILINE)
+    android_pattern = re.compile(r"(androids*{)", re.MULTILINE)
     if android_pattern.search(content):
         if is_kts:
             new_block = """
@@ -331,9 +317,7 @@ PYEOF
           echo "=== VERIFIKASI build.gradle ==="
           grep -A 8 "release {" "$GRADLE_FILE" | head -n 15
           echo ""
-          echo "==============================================="
           echo "PROGUARD PROTECTION AKTIF!"
-          echo "==============================================="
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
