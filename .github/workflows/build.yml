@@ -18,14 +18,14 @@ on:
         required: false
         default: "false"
       obfuscate_so:
-        description: "Amankan file .dart (true/false)"
+        description: "Amankan APK (true/false)"
         required: false
         default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -48,7 +48,7 @@ jobs:
       - name: Extract ZIP
         run: |
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "File bukan ZIP valid!"
+            echo "❌ File bukan ZIP valid!"
             exit 1
           fi
           unzip -q project.zip -d project_raw
@@ -63,124 +63,9 @@ jobs:
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # AMANKAN FILE .dart — Split URL + Resolver (TANPA ENCRYPT)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Amankan File .dart
-        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
-        run: |
-          echo "=== AMANKAN FILE .dart ==="
-          cat > protect-dart.js << 'PROTECT_SCRIPT'
-          const fs = require("fs");
-          const path = require("path");
-
-          const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
-
-          function splitUrl(url) {
-            const len = url.length;
-            if (len < 6) return null;
-            const p1len = Math.ceil(len / 3);
-            const p2len = Math.ceil((len - p1len) / 2);
-            return [
-              url.substring(0, p1len),
-              url.substring(p1len, p1len + p2len),
-              url.substring(p1len + p2len)
-            ].filter(x => x.length > 0);
-          }
-
-          function walkDir(dir, results) {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const entry of entries) {
-              const fullPath = path.join(dir, entry.name);
-              if (entry.isDirectory()) {
-                if (["build", ".dart_tool", ".git", ".idea", "android", "ios", "linux", "macos", "windows", "web", ".vscode"].includes(entry.name)) continue;
-                walkDir(fullPath, results);
-              } else if (entry.isFile() && entry.name.endsWith(".dart")) {
-                results.push(fullPath);
-              }
-            }
-          }
-
-          const projectDir = process.argv[2];
-          const libDir = path.join(projectDir, "lib");
-          if (!fs.existsSync(libDir)) { console.log("Tidak ada lib/"); process.exit(0); }
-
-          const dartFiles = [];
-          walkDir(libDir, dartFiles);
-
-          let counter = 0;
-          const urlMap = {};
-
-          // PASS 1: Split URL -> marker
-          for (const file of dartFiles) {
-            try {
-              let content = fs.readFileSync(file, "utf8");
-              const before = content;
-              content = content.replace(URL_REGEX, (m, q, url) => {
-                const parts = splitUrl(url);
-                if (!parts) return m;
-                const id = counter++;
-                const varName = "__v" + id;
-                urlMap[varName] = parts;
-                return "XSPLITX" + varName + "XENDX";
-              });
-              if (content !== before) fs.writeFileSync(file, content, "utf8");
-            } catch (e) { console.log("Pass1 error " + file + ": " + e.message); }
-          }
-
-          // Buat file resolver
-          const helperLines = [];
-          helperLines.push("// Auto-generated URL resolver");
-          helperLines.push("const Map<String, List<String>> _linkParts = {");
-          for (const [name, parts] of Object.entries(urlMap)) {
-            helperLines.push("  " + JSON.stringify(name) + ": [" + parts.map(p => JSON.stringify(p)).join(", ") + "],");
-          }
-          helperLines.push("};");
-          helperLines.push("");
-          helperLines.push("String __resolve(String name) {");
-          helperLines.push("  final parts = _linkParts[name];");
-          helperLines.push("  if (parts == null) return '';");
-          helperLines.push("  return parts.join('');");
-          helperLines.push("}");
-          helperLines.push("");
-          helperLines.push("String u(String name) => __resolve(name);");
-
-          const resolverPath = path.join(libDir, "link_resolver.dart");
-          fs.writeFileSync(resolverPath, helperLines.join("\n"), "utf8");
-
-          // PASS 2: Replace marker -> u('__vN') + import relative path
-          for (const file of dartFiles) {
-            try {
-              if (path.resolve(file) === path.resolve(resolverPath)) continue;
-              let content = fs.readFileSync(file, "utf8");
-              if (!content.includes("XSPLITX")) continue;
-
-              content = content.replace(/XSPLITX([a-zA-Z0-9_]+)XENDX/g, (_, name) => "u('" + name + "')");
-
-              const fileDir = path.dirname(file);
-              let relPath = path.relative(fileDir, resolverPath).split(path.sep).join("/");
-              if (!relPath.startsWith(".")) relPath = "./" + relPath;
-              const importLine = "import '" + relPath + "';";
-
-              content = content.replace(/^import\s+['"][^'"]*link_resolver\.dart['"];\s*$/gm, "");
-              content = content.replace(/\n\n\n+/g, "\n\n");
-
-              const importRegex = /^import\s+.*?;$/m;
-              if (importRegex.test(content)) {
-                content = content.replace(importRegex, (m) => m + "\n" + importLine);
-              } else {
-                content = importLine + "\n" + content;
-              }
-
-              fs.writeFileSync(file, content, "utf8");
-            } catch (e) { console.log("Pass2 error " + file + ": " + e.message); }
-          }
-
-          console.log("[PROTECT] Done. URLs protected: " + Object.keys(urlMap).length);
-          PROTECT_SCRIPT
-
-          node protect-dart.js "$PROJECT_DIR"
-          echo "=== Protection done ==="
+          echo ""
+          echo "=== ISI PROJECT ==="
+          ls -la "$PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -194,6 +79,110 @@ jobs:
           flutter-version: "3.41.9"
           channel: "stable"
           cache: true
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # VALIDASI & REGENERATE ANDROID FOLDER
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Validate & Regenerate Android Folder
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "=== VALIDASI PROJECT ==="
+
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "❌ ERROR: pubspec.yaml tidak ditemukan!"
+            echo ""
+            echo "Isi folder project:"
+            ls -la
+            echo ""
+            echo "Project harus punya pubspec.yaml di root!"
+            exit 1
+          fi
+
+          echo "✅ pubspec.yaml ditemukan"
+          echo ""
+          echo "=== STRUKTUR PROJECT ==="
+          ls -la
+
+          # Cek folder android
+          if [ ! -d "android" ]; then
+            echo ""
+            echo "⚠️ Folder android/ tidak ada — regenerate..."
+            flutter create --platforms=android .
+            echo "✅ Folder android/ berhasil dibuat"
+          elif [ ! -f "android/gradlew" ]; then
+            echo ""
+            echo "⚠️ File android/gradlew tidak ada — regenerate..."
+            rm -rf android/
+            flutter create --platforms=android .
+            echo "✅ Folder android/ berhasil di-regenerate"
+          else
+            echo "✅ Folder android/ + gradlew valid"
+          fi
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # AMANKAN APK — ProGuard + Anti-Debug
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Setup ProGuard
+        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
+        run: |
+          echo "=== [1/3] SETUP PROGUARD ==="
+
+          GRADLE_FILE="$PROJECT_DIR/android/app/build.gradle"
+          if [ ! -f "$GRADLE_FILE" ]; then
+            GRADLE_FILE="$PROJECT_DIR/android/app/build.gradle.kts"
+          fi
+
+          if [ -f "$GRADLE_FILE" ]; then
+            echo "Found: $GRADLE_FILE"
+
+            if grep -q "minifyEnabled" "$GRADLE_FILE"; then
+              sed -i 's/minifyEnabled[[:space:]]*false/minifyEnabled true/g' "$GRADLE_FILE"
+              sed -i 's/isMinifyEnabled[[:space:]]*false/isMinifyEnabled true/g' "$GRADLE_FILE"
+            else
+              sed -i '/release {/a\            minifyEnabled true\n            shrinkResources true' "$GRADLE_FILE"
+            fi
+
+            echo "✅ ProGuard enabled"
+          else
+            echo "⚠️ Gradle file tidak ditemukan"
+          fi
+
+          PROGUARD_FILE="$PROJECT_DIR/android/app/proguard-rules.pro"
+          if [ ! -f "$PROGUARD_FILE" ]; then
+            cat > "$PROGUARD_FILE" << 'PROGUARD'
+# Flutter keep rules
+-keep class io.flutter.** { *; }
+-keep class io.flutter.plugins.** { *; }
+
+# Obfuscation
+-repackageclasses ''
+-allowaccessmodification
+-dontwarn
+-optimizationpasses 5
+
+# Remove logs
+-assumenosideeffects class android.util.Log {
+  public static *** d(...);
+  public static *** v(...);
+  public static *** i(...);
+}
+PROGUARD
+            echo "✅ proguard-rules.pro created"
+          fi
+
+      - name: Setup Anti-Debug Manifest
+        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
+        run: |
+          echo "=== [2/3] SETUP ANTI-DEBUG MANIFEST ==="
+
+          MANIFEST="$PROJECT_DIR/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i 's/android:debuggable="true"/android:debuggable="false"/g' "$MANIFEST"
+            sed -i 's/android:usesCleartextTraffic="true"/android:usesCleartextTraffic="false"/g' "$MANIFEST"
+            echo "✅ Anti-debug applied"
+          else
+            echo "⚠️ Manifest tidak ditemukan"
+          fi
 
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
@@ -218,31 +207,76 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            timeout 120s flutter pub get || echo "Lanjut..."
+            echo "=== flutter pub get ==="
+            timeout 180s flutter pub get || echo "⚠️ pub get timeout, lanjut..."
           fi
 
+      # ═══════════════════════════════════════════════════════════════════════
+      # BUILD APK — SELALU PAKAI flutter build
+      # ═══════════════════════════════════════════════════════════════════════
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            flutter build apk --${{ github.event.inputs.build_type }}
+          echo "=== BUILD APK ==="
+          echo "Mode: ${{ github.event.inputs.build_type }}"
+          echo "Protect: ${{ github.event.inputs.obfuscate_so }}"
+
+          if [ "${{ github.event.inputs.obfuscate_so }}" = "true" ]; then
+            echo "🔒 Building with OBFUSCATION + ProGuard..."
+            flutter build apk --${{ github.event.inputs.build_type }} --obfuscate --split-debug-info=./build/debug_info
           else
-            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            GRADLE_DIR=$(dirname "$GRADLE_PATH")
-            cd "$GRADLE_DIR" && chmod +x gradlew
-            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              ./gradlew assembleDebug
-            else
-              ./gradlew assembleRelease
-            fi
+            echo "🚀 Building normally..."
+            flutter build apk --${{ github.event.inputs.build_type }}
+          fi
+
+      - name: Re-Sign APK
+        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
+        run: |
+          echo "=== [3/3] RE-SIGN APK ==="
+          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          if [ -z "$APK_FOUND" ]; then
+            echo "APK tidak ditemukan, skip resign"
+            exit 0
+          fi
+
+          echo "APK: $APK_FOUND"
+
+          KEYSTORE="/tmp/release.keystore"
+          if [ ! -f "$KEYSTORE" ]; then
+            keytool -genkey -v -keystore "$KEYSTORE" -alias release \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Release,O=App,C=ID" 2>/dev/null
+          fi
+
+          BT_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ 2>/dev/null | sort -V | tail -n 1)
+          if [ -f "${BT_DIR}zipalign" ] && [ -f "${BT_DIR}apksigner" ]; then
+            "${BT_DIR}zipalign" -f 4 "$APK_FOUND" /tmp/aligned.apk
+            "${BT_DIR}apksigner" sign \
+              --ks "$KEYSTORE" \
+              --ks-pass pass:android \
+              --key-pass pass:android \
+              --ks-key-alias release \
+              --out "$APK_FOUND" \
+              /tmp/aligned.apk
+            "${BT_DIR}apksigner" verify "$APK_FOUND" || true
+            rm -f /tmp/aligned.apk
+            echo "✅ Re-signed"
+          else
+            echo "⚠️ Build tools not found, skip resign"
           fi
 
       - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          if [ -z "$APK_FOUND" ]; then
+            echo "❌ APK tidak ditemukan!"
+            exit 1
+          fi
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
           echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          ls -lh "$APK_FOUND"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
