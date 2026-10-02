@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "URL download ZIP"
+        description: "URL download ZIP project Flutter"
         required: true
       tag:
         description: "Tag build"
@@ -14,11 +14,11 @@ on:
         required: true
         default: "release"
       only_analyze:
-        description: "Analyze only"
+        description: "Hanya jalankan analyze (true/false)"
         required: false
         default: "false"
       obfuscate_so:
-        description: "Encrypt ALL URLs in APK"
+        description: "Protect URL in Dart source (true/false)"
         required: false
         default: "false"
 
@@ -37,13 +37,16 @@ jobs:
 
       - name: Download ZIP project
         run: |
+          echo "=== Downloading ZIP ==="
           curl -L \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip
+            -o project.zip \
+            -w "\n=== HTTP Status: %{http_code} ===\n"
 
           ls -lh project.zip
+          file project.zip
 
       - name: Extract ZIP
         run: |
@@ -62,6 +65,162 @@ jobs:
             PROJECT_DIR="project_raw"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # PROTECT URL — Encrypt URLs in Dart Source (before compile)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Protect URL in Dart Source
+        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
+        run: |
+          echo "=== INSTALLING PROTECTION ==="
+          echo "🔒 Encrypting URLs in Dart source..."
+
+          cat > protect-dart.js << 'PROTECT_SCRIPT'
+          const fs = require("fs");
+          const path = require("path");
+          const crypto = require("crypto");
+
+          const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>]+?|wss?:\/\/[^\s"'<>]+?|ftps?:\/\/[^\s"'<>]+?)\1/g;
+
+          function encryptUrl(url) {
+            const key = 0xA7;
+            const buf = Buffer.from(url, "utf8");
+            const xored = Buffer.alloc(buf.length);
+            for (let i = 0; i < buf.length; i++) {
+              xored[i] = buf[i] ^ key;
+            }
+            const b64 = xored.toString("base64").replace(/=+$/, "");
+            return "XTRX::" + b64;
+          }
+
+          function encryptDartFile(filePath) {
+            let content = fs.readFileSync(filePath, "utf8");
+            let changed = false;
+            const foundUrls = [];
+
+            content = content.replace(URL_REGEX, (match, quote, url) => {
+              if (url.startsWith("XTRX::")) return match;
+              const encrypted = encryptUrl(url);
+              foundUrls.push(url);
+              changed = true;
+              return quote + encrypted + quote;
+            });
+
+            if (changed) {
+              // Inject import decrypt helper
+              const importLine = "import 'xtrx_decrypt.dart';";
+              if (!content.includes("xtrx_decrypt.dart")) {
+                const importRegex = /^imports+.*?;$/m;
+                if (importRegex.test(content)) {
+                  content = content.replace(importRegex, (m) => m + "
+" + importLine);
+                } else {
+                  content = importLine + "
+" + content;
+                }
+              }
+              fs.writeFileSync(filePath, content, "utf8");
+            }
+
+            return { changed, urls: foundUrls };
+          }
+
+          function walkDir(dir, results) {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+              const fullPath = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                if (["build", ".dart_tool", ".git", ".idea", "android", "ios", "linux", "macos", "windows", "web", ".vscode"].includes(entry.name)) continue;
+                walkDir(fullPath, results);
+              } else if (entry.isFile() && entry.name.endsWith(".dart")) {
+                results.push(fullPath);
+              }
+            }
+          }
+
+          const projectDir = process.argv[2];
+          const libDir = path.join(projectDir, "lib");
+
+          if (!fs.existsSync(libDir)) {
+            console.log("[ENCRYPT] Tidak ada folder lib/, skip");
+            process.exit(0);
+          }
+
+          const dartFiles = [];
+          walkDir(libDir, dartFiles);
+
+          let totalFiles = dartFiles.length;
+          let encryptedFiles = 0;
+          let totalUrls = 0;
+
+          for (const file of dartFiles) {
+            try {
+              const result = encryptDartFile(file);
+              if (result.changed) {
+                encryptedFiles++;
+                totalUrls += result.urls.length;
+              }
+            } catch (e) {
+              console.log("[ENCRYPT] Error " + file + ": " + e.message);
+            }
+          }
+
+          // Buat file decrypt helper
+          const decryptHelper = `// Auto-generated
+const int _XTRX_KEY = 0xA7;
+const String _XTRX_PREFIX = "XTRX::";
+
+String xtrxDecrypt(String encrypted) {
+  if (!encrypted.startsWith(_XTRX_PREFIX)) return encrypted;
+  String b64 = encrypted.substring(_XTRX_PREFIX.length);
+  while (b64.length % 4 != 0) b64 += "=";
+  List<int> bytes;
+  try { bytes = _base64Decode(b64); } catch (e) { return encrypted; }
+  for (int i = 0; i < bytes.length; i++) bytes[i] = bytes[i] ^ _XTRX_KEY;
+  return String.fromCharCodes(bytes);
+}
+
+String x(String encrypted) => xtrxDecrypt(encrypted);
+
+const String _b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+List<int> _base64Decode(String input) {
+  final result = <int>[];
+  final buffer = <int>[];
+  for (int i = 0; i < input.length; i++) {
+    final c = input[i];
+    if (c == '=') break;
+    final idx = _b64chars.indexOf(c);
+    if (idx < 0) continue;
+    buffer.add(idx);
+    if (buffer.length == 4) {
+      result.add((buffer[0] << 2) | (buffer[1] >> 4));
+      result.add(((buffer[1] & 0xF) << 4) | (buffer[2] >> 2));
+      result.add(((buffer[2] & 0x3) << 6) | buffer[3]);
+      buffer.clear();
+    }
+  }
+  if (buffer.length == 2) {
+    result.add((buffer[0] << 2) | (buffer[1] >> 4));
+  } else if (buffer.length == 3) {
+    result.add((buffer[0] << 2) | (buffer[1] >> 4));
+    result.add(((buffer[1] & 0xF) << 4) | (buffer[2] >> 2));
+  }
+  return result;
+}
+`;
+
+          fs.writeFileSync(path.join(libDir, "xtrx_decrypt.dart"), decryptHelper, "utf8");
+
+          console.log("[PROTECT_RESULT]");
+          console.log("TOTAL_DART_FILES=" + totalFiles);
+          console.log("ENCRYPTED_FILES=" + encryptedFiles);
+          console.log("TOTAL_URLS_ENCRYPTED=" + totalUrls);
+          console.log("[END_PROTECT_RESULT]");
+          PROTECT_SCRIPT
+
+          node protect-dart.js "$PROJECT_DIR"
+          echo "=== Protection done ==="
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -118,257 +277,17 @@ jobs:
             fi
           fi
 
-      - name: Find built APK
+      - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          echo "APK_PATH=$APK_FOUND" >> $GITHUB_ENV
-          echo "APK: $APK_FOUND"
-
-      - name: Encrypt ALL URLs in APK
-        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
-        run: |
-          echo "=== INSTALLING PROTECTION ==="
-          npm install adm-zip --no-save 2>&1 | tail -2
-
-          cat > protect-all.js << 'PROTECT_SCRIPT'
-          const fs = require("fs");
-          const crypto = require("crypto");
-          const AdmZip = require("adm-zip");
-
-          const URL_REGEX = /\b(https?:\/\/[^\s"'<>()\[\]{}\\,;|`]{4,}|wss?:\/\/[^\s"'<>()\[\]{}\\,;|`]{4,}|ftps?:\/\/[^\s"'<>()\[\]{}\\,;|`]{4,})/gi;
-
-          function encryptUrl(url) {
-            const key = 0xA7;
-            const buf = Buffer.from(url, "utf8");
-            const xored = Buffer.alloc(buf.length);
-            for (let i = 0; i < buf.length; i++) {
-              xored[i] = buf[i] ^ key;
-            }
-            const b64 = xored.toString("base64").replace(/=+$/, "");
-            return "XTRX::" + b64;
-          }
-
-          function encryptInBuffer(buffer) {
-            const stats = { urlsFound: 0, urlsEncrypted: 0, bytesChanged: 0 };
-
-            const buf = Buffer.from(buffer);
-            const text = buf.toString("latin1");
-            const matches = [...text.matchAll(URL_REGEX)];
-            if (matches.length === 0) return { buffer: buf, stats };
-
-            stats.urlsFound = matches.length;
-
-            const sorted = [...matches].sort((a, b) => b.index - a.index);
-
-            for (const m of sorted) {
-              const url = m[0];
-              const start = m.index;
-              const len = url.length;
-
-              const encrypted = encryptUrl(url);
-              if (encrypted.length > len) continue;
-
-              const encBuf = Buffer.alloc(len, 0x00);
-              Buffer.from(encrypted, "utf8").copy(encBuf, 0);
-              encBuf.copy(buf, start);
-
-              stats.urlsEncrypted++;
-              stats.bytesChanged += len;
-            }
-
-            return { buffer: buf, stats };
-          }
-
-          // File yang di-scan (semua file teks & binary)
-          const SCANNABLE = [
-            ".so", ".dex", ".json", ".xml", ".txt", ".html", ".htm",
-            ".js", ".properties", ".yml", ".yaml", ".cfg", ".conf",
-            ".ini", ".env", ".dart", ".kt", ".java", ".gradle", ".md",
-            ".csv", ".smali", ".rs", ".ts", ".tsx", ".jsx", ".vue",
-            ".css", ".scss", ".svg", ".sql", ".map", ".plist", ".js.map",
-          ];
-
-          const SKIP_PATTERNS = [
-            /^META-INF\//i,
-            /^res\/drawable/i,
-            /^res\/mipmap/i,
-            /^res\/raw\//i,
-            /\.(png|jpg|jpeg|gif|webp|bmp|ico|ttf|otf|woff2?|dat|mp3|mp4|wav|ogg|webm|zip|jar|pak)$/i,
-          ];
-
-          function shouldSkip(name) {
-            return SKIP_PATTERNS.some((p) => p.test(name));
-          }
-
-          function isScannable(name) {
-            const lower = name.toLowerCase();
-            return SCANNABLE.some((ext) => lower.endsWith(ext));
-          }
-
-          const apkPath = process.argv[2];
-          const outPath = process.argv[3];
-
-          const zip = new AdmZip(apkPath);
-          const entries = zip.getEntries();
-
-          let totalFiles = 0;
-          let encryptedFiles = 0;
-          let skippedFiles = 0;
-          let totalUrlsFound = 0;
-          let totalUrlsEncrypted = 0;
-          let totalBytesChanged = 0;
-          const filesReport = [];
-
-          for (const entry of entries) {
-            if (entry.isDirectory) continue;
-            if (shouldSkip(entry.entryName)) continue;
-            if (!isScannable(entry.entryName)) continue;
-
-            totalFiles++;
-
-            try {
-              const buf = entry.getData();
-              const { buffer: encBuf, stats } = encryptInBuffer(buf);
-
-              if (stats.urlsEncrypted === 0) {
-                skippedFiles++;
-                continue;
-              }
-
-              zip.updateFile(entry.entryName, encBuf);
-              encryptedFiles++;
-              totalUrlsFound += stats.urlsFound;
-              totalUrlsEncrypted += stats.urlsEncrypted;
-              totalBytesChanged += stats.bytesChanged;
-
-              if (filesReport.length < 20) {
-                filesReport.push({
-                  file: entry.entryName,
-                  urls: stats.urlsEncrypted,
-                });
-              }
-            } catch (e) {
-              // skip file error
-            }
-          }
-
-          // Inject decrypt helper
-          const decryptHelper = `/**
- * XTRX URL Decrypt Helper
- * Auto-injected during build
- */
-(function() {
-  "use strict";
-  var KEY = 0xA7;
-
-  function base64ToBytes(b64) {
-    var bin = atob(b64);
-    var bytes = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
-  }
-
-  function decrypt(encrypted) {
-    if (!encrypted || typeof encrypted !== "string") return encrypted;
-    if (encrypted.indexOf("XTRX::") !== 0) return encrypted;
-    var b64 = encrypted.slice(6).replace(/\\0+$/, "").trim();
-    try {
-      var bytes = base64ToBytes(b64);
-      for (var i = 0; i < bytes.length; i++) bytes[i] = bytes[i] ^ KEY;
-      return new TextDecoder().decode(bytes);
-    } catch (e) {
-      return encrypted;
-    }
-  }
-
-  window.__XTRX__ = { decrypt: decrypt };
-  window.XTRX_DECRYPT = decrypt;
-})();
-`;
-
-          try {
-            zip.addFile("assets/xtrx-decrypt.js", Buffer.from(decryptHelper, "utf8"));
-          } catch (e) {}
-
-          // Inject config
-          const config = {
-            _meta: {
-              injected_at: new Date().toISOString(),
-              tool: "XTRX URL Encryptor",
-              version: "1.0",
-            },
-            encryption: {
-              algorithm: "XOR-BASE64",
-              key: "0xA7",
-              prefix: "XTRX::",
-              note: "Use window.XTRX_DECRYPT(url) to decode",
-            },
-          };
-          try {
-            zip.addFile("assets/xtrx-config.json", Buffer.from(JSON.stringify(config, null, 2), "utf8"));
-          } catch (e) {}
-
-          zip.writeZip(outPath);
-
-          // Report
-          console.log("[PROTECT_RESULT]");
-          console.log("TOTAL_FILES=" + totalFiles);
-          console.log("ENCRYPTED_FILES=" + encryptedFiles);
-          console.log("SKIPPED_FILES=" + skippedFiles);
-          console.log("TOTAL_URLS_FOUND=" + totalUrlsFound);
-          console.log("TOTAL_URLS_ENCRYPTED=" + totalUrlsEncrypted);
-          console.log("TOTAL_BYTES_CHANGED=" + totalBytesChanged);
-          for (const f of filesReport) {
-            console.log("FILE_ENC=" + f.file + "=" + f.urls);
-          }
-          console.log("[END_PROTECT_RESULT]");
-          PROTECT_SCRIPT
-
-          node protect-all.js "$APK_PATH" "/tmp/apk_encrypted.apk"
-
-          echo ""
-          echo "=== RE-SIGNING APK ==="
-          BT_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ 2>/dev/null | sort -V | tail -n 1)
-          KEYSTORE="/tmp/resign.keystore"
-
-          keytool -genkey -v -keystore "$KEYSTORE" -alias resign \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android \
-            -dname "CN=Android,O=Android,C=US" 2>/dev/null
-
-          cd /tmp
-          rm -rf apk_clean
-          mkdir -p apk_clean && cd apk_clean
-          unzip -q /tmp/apk_encrypted.apk -d .
-          rm -rf META-INF
-          zip -qr /tmp/apk_unsigned.apk .
-
-          cd $GITHUB_WORKSPACE
-
-          if [ -f "${BT_DIR}zipalign" ]; then
-            "${BT_DIR}zipalign" -f 4 /tmp/apk_unsigned.apk /tmp/apk_aligned.apk
-            "${BT_DIR}apksigner" sign \
-              --ks "$KEYSTORE" \
-              --ks-pass pass:android \
-              --key-pass pass:android \
-              --ks-key-alias resign \
-              --out "$APK_PATH" \
-              /tmp/apk_aligned.apk
-            "${BT_DIR}apksigner" verify "$APK_PATH" || echo "verify warning"
-          else
-            cp /tmp/apk_unsigned.apk "$APK_PATH"
-            jarsigner -keystore "$KEYSTORE" -storepass android -keypass android \
-              -sigalg SHA1withRSA -digestalg SHA1 "$APK_PATH" resign
-          fi
-
-          rm -f /tmp/apk_unsigned.apk /tmp/apk_aligned.apk /tmp/apk_encrypted.apk
-          ls -lh "$APK_PATH"
-          echo "=== APK ready ==="
+          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
-          path: ${{ env.APK_PATH }}
+          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
