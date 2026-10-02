@@ -120,14 +120,14 @@ jobs:
             timeout 120s flutter pub get || echo "Lanjut..."
           fi
 
-      - name: Inject ProGuard Protection
+      - name: Inject ProGuard + Hardening Protection
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          echo "PROGUARD PROTECTION INJECTOR AKTIF"
+          echo "PROGUARD + HARDENING INJECTOR AKTIF"
           echo ""
 
           if [ ! -f "pubspec.yaml" ]; then
-            echo "Bukan project Flutter, skip ProGuard."
+            echo "Bukan project Flutter, skip."
             exit 0
           fi
 
@@ -196,7 +196,7 @@ jobs:
 
           sed -i 's/^          //' "$PROGUARD_FILE"
 
-          echo "proguard-rules.pro dibuat ($(wc -l < "$PROGUARD_FILE") baris)"
+          echo "proguard-rules.pro dibuat"
           echo ""
 
           GRADLE_FILE=""
@@ -279,7 +279,9 @@ else:
     print("buildTypes/release tidak ditemukan, coba fallback...")
 
     android_pattern = re.compile(r"(androids*{)", re.MULTILINE)
-    if android_pattern.search(content):
+    android_match = android_pattern.search(content)
+
+    if android_match:
         if is_kts:
             new_block = """
     buildTypes {
@@ -303,7 +305,9 @@ else:
         }
     }
 """
-        new_content = android_pattern.sub(r"\1" + new_block, content, count=1)
+
+        pos = android_match.end()
+        new_content = content[:pos] + new_block + content[pos:]
 
         with open(gradle_file, "w", encoding="utf-8") as f:
             f.write(new_content)
@@ -314,16 +318,201 @@ else:
 PYEOF
 
           echo ""
+          echo "=== Inject Dart Hardening ==="
+          mkdir -p lib
+
+          cat > lib/app_hardening.dart << 'HARDEN_EOF'
+          import 'dart:io';
+          import 'package:flutter/foundation.dart';
+          import 'package:flutter/services.dart';
+
+          class AppHardening {
+            static bool _blocked = false;
+
+            static Future<void> init() async {
+              if (kDebugMode) return;
+
+              try {
+                if (Platform.isAndroid) {
+                  await _checkRootAndroid();
+                  await _checkEmulatorAndroid();
+                  await _checkHooksAndroid();
+                  await _checkDebuggerAndroid();
+                } else if (Platform.isIOS) {
+                  await _checkJailbreakIOS();
+                }
+              } catch (e) {
+                _blocked = true;
+              }
+
+              if (_blocked) {
+                await Future.delayed(const Duration(milliseconds: 200));
+                exit(0);
+              }
+            }
+
+            static Future<void> _checkRootAndroid() async {
+              final paths = [
+                '/system/app/Superuser.apk',
+                '/sbin/su',
+                '/system/bin/su',
+                '/system/xbin/su',
+                '/data/local/xbin/su',
+                '/data/local/bin/su',
+                '/system/sd/xbin/su',
+                '/system/bin/failsafe/su',
+                '/data/local/su',
+                '/su/bin/su',
+                '/magisk/.core/bin/su',
+              ];
+
+              for (final p in paths) {
+                if (await File(p).exists()) {
+                  _blocked = true;
+                  return;
+                }
+              }
+            }
+
+            static Future<void> _checkEmulatorAndroid() async {
+              const channel = MethodChannel('app_hardening');
+              try {
+                final isEmu = await channel.invokeMethod<bool>('isEmulator') ?? false;
+                if (isEmu) _blocked = true;
+              } catch (_) {}
+            }
+
+            static Future<void> _checkHooksAndroid() async {
+              final hookLibs = ['frida', 'xposed', 'substrate'];
+
+              try {
+                final maps = await File('/proc/self/maps').readAsString();
+                for (final h in hookLibs) {
+                  if (maps.toLowerCase().contains(h)) {
+                    _blocked = true;
+                    return;
+                  }
+                }
+              } catch (_) {}
+            }
+
+            static Future<void> _checkDebuggerAndroid() async {
+              try {
+                final status = await File('/proc/self/status').readAsString();
+                final lines = status.split('
+');
+                for (final l in lines) {
+                  if (l.startsWith('TracerPid:')) {
+                    final pid = l.split(':')[1].trim();
+                    if (pid != '0') _blocked = true;
+                  }
+                }
+              } catch (_) {}
+            }
+
+            static Future<void> _checkJailbreakIOS() async {
+              final paths = [
+                '/Applications/Cydia.app',
+                '/Library/MobileSubstrate/MobileSubstrate.dylib',
+                '/bin/bash',
+                '/usr/sbin/sshd',
+                '/etc/apt',
+                '/private/var/lib/apt/',
+              ];
+
+              for (final p in paths) {
+                if (await File(p).exists()) {
+                  _blocked = true;
+                  return;
+                }
+              }
+            }
+          }
+          HARDEN_EOF
+
+          sed -i 's/^          //' lib/app_hardening.dart
+
+          cat > lib/secure_string.dart << 'SECSTR_EOF'
+          class SecureString {
+            static final Map<String, String> _cache = {};
+
+            static String decode(List<int> keys, List<int> seeds) {
+              final cacheKey = keys.join(',') + ':' + seeds.join(',');
+              if (_cache.containsKey(cacheKey)) return _cache[cacheKey]!;
+
+              final buf = StringBuffer();
+              for (int i = 0; i < keys.length; i++) {
+                final k = (keys[i] ^ seeds[i % seeds.length]) & 0xFF;
+                buf.writeCharCode(k);
+              }
+
+              final result = buf.toString();
+              _cache[cacheKey] = result;
+              return result;
+            }
+
+            static List<int> encode(String plain, List<int> seeds) {
+              final result = <int>[];
+              for (int i = 0; i < plain.length; i++) {
+                result.add((plain.codeUnitAt(i) ^ seeds[i % seeds.length]) & 0xFF);
+              }
+              return result;
+            }
+          }
+          SECSTR_EOF
+
+          sed -i 's/^          //' lib/secure_string.dart
+
+          echo "lib/app_hardening.dart dan lib/secure_string.dart dibuat"
+          echo ""
+
+          echo "=== Inject main.dart hook ==="
+          if [ -f lib/main.dart ]; then
+            if ! grep -q "AppHardening" lib/main.dart; then
+              python3 << 'MAINPYEOF'
+import re
+
+path = "lib/main.dart"
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+if "import 'app_hardening.dart';" not in content:
+    content = "import 'app_hardening.dart';
+" + content
+
+pattern = re.compile(r"(voids+mains*(s*)s*(?:asyncs*)?{)")
+
+match = pattern.search(content)
+
+if match:
+    pos = match.end()
+    prefix = content[:pos]
+    suffix = content[pos:]
+    content = prefix + "
+  AppHardening.init();" + suffix
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("main.dart di-inject AppHardening.init()")
+else:
+    print("Pola void main() tidak ditemukan, skip inject")
+MAINPYEOF
+            else
+              echo "AppHardening sudah ada di main.dart, skip."
+            fi
+          fi
+
+          echo ""
           echo "=== VERIFIKASI build.gradle ==="
           grep -A 8 "release {" "$GRADLE_FILE" | head -n 15
           echo ""
-          echo "PROGUARD PROTECTION AKTIF!"
+          echo "PROGUARD + HARDENING AKTIF!"
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            echo "=== Build APK (dengan ProGuard protection) ==="
+            echo "=== Build APK (ProGuard + Hardening) ==="
             flutter clean
             flutter build apk --${{ github.event.inputs.build_type }}
 
