@@ -85,25 +85,13 @@ jobs:
             State<SplashScreen> createState() => _SplashScreenState();
           }
 
-          class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
-            late AnimationController _fadeController;
-            late AnimationController _scaleController;
-            late AnimationController _dotController;
-            late Animation<double> _fadeAnim;
-            late Animation<double> _scaleAnim;
+          class _SplashScreenState extends State<SplashScreen> {
             bool _isChecking = false;
             bool _dialogShown = false;
 
             @override
             void initState() {
               super.initState();
-              _fadeController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
-              _scaleController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
-              _dotController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..repeat();
-              _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(parent: _fadeController, curve: Curves.easeOut));
-              _scaleAnim = Tween<double>(begin: 0.75, end: 1.0).animate(CurvedAnimation(parent: _scaleController, curve: Curves.easeOutBack));
-              _fadeController.forward();
-              _scaleController.forward();
               Timer(const Duration(milliseconds: 1500), () => _checkConnectionAndNavigate());
             }
 
@@ -137,9 +125,6 @@ jobs:
                 ),
               );
             }
-
-            @override
-            void dispose() { _fadeController.dispose(); _scaleController.dispose(); _dotController.dispose(); super.dispose(); }
 
             @override
             Widget build(BuildContext context) {
@@ -202,113 +187,11 @@ jobs:
           EOF
           cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
 
-      - name: Inject ProGuard Protection
-        run: |
-          echo "PROGUARD INJECTOR AKTIF (Web2APK)"
-
-          ANDROID_APP="myapp/android/app"
-
-          cat > "$ANDROID_APP/proguard-rules.pro" << 'PROGUARD_EOF'
-          -keep class io.flutter.** { *; }
-          -keep class io.flutter.plugins.** { *; }
-          -keep class io.flutter.plugin.** { *; }
-          -keep class io.flutter.embedding.** { *; }
-          -keepattributes Signature
-          -keepattributes *Annotation*
-          -keepattributes InnerClasses
-          -keepattributes EnclosingMethod
-          -keepattributes SourceFile,LineNumberTable
-          -renamesourcefileattribute SourceFile
-          -keep class androidx.webkit.** { *; }
-          -keep class android.webkit.** { *; }
-          -keepclassmembers class * extends android.webkit.WebViewClient { *; }
-          -keepclassmembers class * extends android.webkit.WebChromeClient { *; }
-          -keep class dev.fluttercommunity.plus.connectivity.** { *; }
-          -keep class androidx.lifecycle.** { *; }
-          -keep class * extends androidx.lifecycle.LifecycleObserver { *; }
-          -keep class * extends androidx.lifecycle.ViewModel { *; }
-          -keep class kotlin.** { *; }
-          -dontwarn kotlin.**
-          -keepclasseswithmembernames class * { native <methods>; }
-          -keep class * implements android.os.Parcelable {
-              public static final android.os.Parcelable$Creator *;
-          }
-          -dontwarn io.flutter.**
-          -dontwarn androidx.**
-          -dontwarn kotlin.**
-          -dontwarn javax.annotation.**
-          PROGUARD_EOF
-
-          sed -i 's/^          //' "$ANDROID_APP/proguard-rules.pro"
-          echo "proguard-rules.pro dibuat"
-
-          export GRADLE_FILE="myapp/android/app/build.gradle"
-
-          python3 << 'PYEOF'
-import re, os
-
-path = os.environ.get("GRADLE_FILE", "myapp/android/app/build.gradle")
-if not os.path.exists(path):
-    print("build.gradle tidak ada, skip.")
-    exit(0)
-
-with open(path) as f:
-    content = f.read()
-
-inject = """
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-"""
-
-pattern = re.compile(r"(buildTypess*{[sS]*?releases*{)([sS]*?)(
-s*})", re.MULTILINE)
-m = pattern.search(content)
-
-if m:
-    start, body, end = m.group(1), m.group(2), m.group(3)
-    body = re.sub(r"s*minifyEnableds+w+", "", body)
-    body = re.sub(r"s*shrinkResourcess+w+", "", body)
-    body = re.sub(r"s*proguardFiles[sS]*?(?=
-s*w|
-s*})", "", body)
-    content = content[:m.start()] + start + inject + body + end + content[m.end():]
-    with open(path, "w") as f:
-        f.write(content)
-    print("build.gradle di-inject ProGuard!")
-else:
-    print("buildTypes/release tidak ketemu, skip.")
-PYEOF
-
-          echo ""
-          echo "=== VERIFIKASI ==="
-          grep -A 6 "release {" myapp/android/app/build.gradle | head -n 12
-          echo "PROGUARD AKTIF!"
-
       - name: Build APK
-        run: |
-          cd myapp
-          flutter clean
-          flutter build apk --release
-
-          echo ""
-          echo "=== Cek mapping.txt ==="
-          MAPPING=$(find . -name "mapping.txt" -path "*release*" 2>/dev/null | head -n 1)
-          if [ -n "$MAPPING" ]; then
-            echo "ProGuard mapping: $MAPPING"
-          fi
+        run: cd myapp && flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: web2apk-release
           path: myapp/build/app/outputs/flutter-apk/app-release.apk
-
-      - name: Upload ProGuard Mapping
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: web2apk-proguard-mapping
-          path: myapp/**/mapping.txt
-          retention-days: 30
-          if-no-files-found: ignore
