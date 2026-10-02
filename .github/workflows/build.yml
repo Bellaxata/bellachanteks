@@ -17,15 +17,11 @@ on:
         description: "Hanya jalankan analyze (true/false)"
         required: false
         default: "false"
-      obfuscate_so:
-        description: "Amankan APK (true/false)"
-        required: false
-        default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -38,21 +34,43 @@ jobs:
       - name: Download ZIP project
         run: |
           echo "=== Downloading ZIP ==="
+          echo "URL: ${{ github.event.inputs.zip_url }}"
+
           curl -L \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip
+            -o project.zip \
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+
+          echo ""
+          echo "=== File Info ==="
           ls -lh project.zip
+          echo ""
+          echo "=== File Type ==="
+          file project.zip
+          echo ""
+          echo "=== First Bytes ==="
+          xxd project.zip | head -2
 
       - name: Extract ZIP
         run: |
+          echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "❌ File bukan ZIP valid!"
+            echo "File bukan ZIP valid!"
+            echo ""
+            echo "=== Isi file ==="
+            cat project.zip
             exit 1
           fi
+          echo "ZIP valid"
+
+          echo ""
+          echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
 
+          echo ""
+          echo "=== Mengunci Project Dir ==="
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
 
@@ -62,10 +80,6 @@ jobs:
             PROJECT_DIR="project_raw"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-
-          echo ""
-          echo "=== ISI PROJECT ==="
-          ls -la "$PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -79,110 +93,6 @@ jobs:
           flutter-version: "3.41.9"
           channel: "stable"
           cache: true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # VALIDASI & REGENERATE ANDROID FOLDER
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Validate & Regenerate Android Folder
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          echo "=== VALIDASI PROJECT ==="
-
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "❌ ERROR: pubspec.yaml tidak ditemukan!"
-            echo ""
-            echo "Isi folder project:"
-            ls -la
-            echo ""
-            echo "Project harus punya pubspec.yaml di root!"
-            exit 1
-          fi
-
-          echo "✅ pubspec.yaml ditemukan"
-          echo ""
-          echo "=== STRUKTUR PROJECT ==="
-          ls -la
-
-          # Cek folder android
-          if [ ! -d "android" ]; then
-            echo ""
-            echo "⚠️ Folder android/ tidak ada — regenerate..."
-            flutter create --platforms=android .
-            echo "✅ Folder android/ berhasil dibuat"
-          elif [ ! -f "android/gradlew" ]; then
-            echo ""
-            echo "⚠️ File android/gradlew tidak ada — regenerate..."
-            rm -rf android/
-            flutter create --platforms=android .
-            echo "✅ Folder android/ berhasil di-regenerate"
-          else
-            echo "✅ Folder android/ + gradlew valid"
-          fi
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # AMANKAN APK — ProGuard + Anti-Debug
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Setup ProGuard
-        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
-        run: |
-          echo "=== [1/3] SETUP PROGUARD ==="
-
-          GRADLE_FILE="$PROJECT_DIR/android/app/build.gradle"
-          if [ ! -f "$GRADLE_FILE" ]; then
-            GRADLE_FILE="$PROJECT_DIR/android/app/build.gradle.kts"
-          fi
-
-          if [ -f "$GRADLE_FILE" ]; then
-            echo "Found: $GRADLE_FILE"
-
-            if grep -q "minifyEnabled" "$GRADLE_FILE"; then
-              sed -i 's/minifyEnabled[[:space:]]*false/minifyEnabled true/g' "$GRADLE_FILE"
-              sed -i 's/isMinifyEnabled[[:space:]]*false/isMinifyEnabled true/g' "$GRADLE_FILE"
-            else
-              sed -i '/release {/a\            minifyEnabled true\n            shrinkResources true' "$GRADLE_FILE"
-            fi
-
-            echo "✅ ProGuard enabled"
-          else
-            echo "⚠️ Gradle file tidak ditemukan"
-          fi
-
-          PROGUARD_FILE="$PROJECT_DIR/android/app/proguard-rules.pro"
-          if [ ! -f "$PROGUARD_FILE" ]; then
-            cat > "$PROGUARD_FILE" << 'PROGUARD'
-# Flutter keep rules
--keep class io.flutter.** { *; }
--keep class io.flutter.plugins.** { *; }
-
-# Obfuscation
--repackageclasses ''
--allowaccessmodification
--dontwarn
--optimizationpasses 5
-
-# Remove logs
--assumenosideeffects class android.util.Log {
-  public static *** d(...);
-  public static *** v(...);
-  public static *** i(...);
-}
-PROGUARD
-            echo "✅ proguard-rules.pro created"
-          fi
-
-      - name: Setup Anti-Debug Manifest
-        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
-        run: |
-          echo "=== [2/3] SETUP ANTI-DEBUG MANIFEST ==="
-
-          MANIFEST="$PROJECT_DIR/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            sed -i 's/android:debuggable="true"/android:debuggable="false"/g' "$MANIFEST"
-            sed -i 's/android:usesCleartextTraffic="true"/android:usesCleartextTraffic="false"/g' "$MANIFEST"
-            echo "✅ Anti-debug applied"
-          else
-            echo "⚠️ Manifest tidak ditemukan"
-          fi
 
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
@@ -207,76 +117,258 @@ PROGUARD
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            echo "=== flutter pub get ==="
-            timeout 180s flutter pub get || echo "⚠️ pub get timeout, lanjut..."
+            timeout 120s flutter pub get || echo "Lanjut..."
           fi
 
-      # ═══════════════════════════════════════════════════════════════════════
-      # BUILD APK — SELALU PAKAI flutter build
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Build APK
+      - name: Inject ProGuard Protection
         working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GRADLE_FILE_ENV: ${{ env.PROJECT_DIR }}/android/app/build.gradle
         run: |
-          echo "=== BUILD APK ==="
-          echo "Mode: ${{ github.event.inputs.build_type }}"
-          echo "Protect: ${{ github.event.inputs.obfuscate_so }}"
+          echo "==============================================="
+          echo "PROGUARD PROTECTION INJECTOR AKTIF"
+          echo "==============================================="
+          echo ""
 
-          if [ "${{ github.event.inputs.obfuscate_so }}" = "true" ]; then
-            echo "🔒 Building with OBFUSCATION + ProGuard..."
-            flutter build apk --${{ github.event.inputs.build_type }} --obfuscate --split-debug-info=./build/debug_info
-          else
-            echo "🚀 Building normally..."
-            flutter build apk --${{ github.event.inputs.build_type }}
-          fi
-
-      - name: Re-Sign APK
-        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
-        run: |
-          echo "=== [3/3] RE-SIGN APK ==="
-          APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          if [ -z "$APK_FOUND" ]; then
-            echo "APK tidak ditemukan, skip resign"
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "Bukan project Flutter, skip ProGuard."
             exit 0
           fi
 
-          echo "APK: $APK_FOUND"
+          ANDROID_APP=""
+          for CANDIDATE in "android/app" "app"; do
+            if [ -d "$CANDIDATE" ]; then
+              ANDROID_APP="$CANDIDATE"
+              break
+            fi
+          done
 
-          KEYSTORE="/tmp/release.keystore"
-          if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkey -v -keystore "$KEYSTORE" -alias release \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass android -keypass android \
-              -dname "CN=Release,O=App,C=ID" 2>/dev/null
+          if [ -z "$ANDROID_APP" ]; then
+            ANDROID_APP=$(find . -type d -path "*/android/app" -not -path "*/build/*" | head -n 1)
           fi
 
-          BT_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ 2>/dev/null | sort -V | tail -n 1)
-          if [ -f "${BT_DIR}zipalign" ] && [ -f "${BT_DIR}apksigner" ]; then
-            "${BT_DIR}zipalign" -f 4 "$APK_FOUND" /tmp/aligned.apk
-            "${BT_DIR}apksigner" sign \
-              --ks "$KEYSTORE" \
-              --ks-pass pass:android \
-              --key-pass pass:android \
-              --ks-key-alias release \
-              --out "$APK_FOUND" \
-              /tmp/aligned.apk
-            "${BT_DIR}apksigner" verify "$APK_FOUND" || true
-            rm -f /tmp/aligned.apk
-            echo "✅ Re-signed"
+          if [ -z "$ANDROID_APP" ] || [ ! -d "$ANDROID_APP" ]; then
+            echo "Folder android/app tidak ditemukan, skip ProGuard."
+            exit 0
+          fi
+
+          echo "Android app dir: $ANDROID_APP"
+          echo ""
+
+          PROGUARD_FILE="$ANDROID_APP/proguard-rules.pro"
+
+          cat > "$PROGUARD_FILE" << 'PROGUARD_EOF'
+          # ============================================
+          # ProGuard/R8 Rules - Auto-generated
+          # ============================================
+
+          -keep class io.flutter.** { *; }
+          -keep class io.flutter.plugins.** { *; }
+          -keep class io.flutter.plugin.** { *; }
+          -keep class io.flutter.embedding.** { *; }
+
+          -keepattributes Signature
+          -keepattributes *Annotation*
+          -keepattributes InnerClasses
+          -keepattributes EnclosingMethod
+          -keepattributes SourceFile,LineNumberTable
+          -renamesourcefileattribute SourceFile
+
+          -keep class androidx.webkit.** { *; }
+          -keep class android.webkit.** { *; }
+          -keepclassmembers class * extends android.webkit.WebViewClient { *; }
+          -keepclassmembers class * extends android.webkit.WebChromeClient { *; }
+
+          -keep class com.google.android.gms.** { *; }
+          -dontwarn com.google.android.gms.**
+
+          -keep class dev.fluttercommunity.plus.connectivity.** { *; }
+
+          -keep class androidx.lifecycle.** { *; }
+          -keep class * extends androidx.lifecycle.LifecycleObserver { *; }
+          -keep class * extends androidx.lifecycle.ViewModel { *; }
+
+          -keep class androidx.core.** { *; }
+          -keep class androidx.annotation.** { *; }
+
+          -keep class kotlin.** { *; }
+          -keep class kotlinx.coroutines.** { *; }
+          -dontwarn kotlin.**
+          -dontwarn kotlinx.**
+
+          -keepclasseswithmembernames class * { native <methods>; }
+
+          -keep class * implements android.os.Parcelable {
+              public static final android.os.Parcelable$Creator *;
+          }
+
+          -keepclassmembers enum * {
+              public static **[] values();
+              public static ** valueOf(java.lang.String);
+          }
+
+          -dontwarn io.flutter.**
+          -dontwarn androidx.**
+          -dontwarn org.jetbrains.**
+          -dontwarn javax.annotation.**
+          PROGUARD_EOF
+
+          sed -i 's/^          //' "$PROGUARD_FILE"
+
+          echo "proguard-rules.pro dibuat ($(wc -l < "$PROGUARD_FILE") baris)"
+          echo ""
+
+          GRADLE_FILE=""
+          IS_KTS=false
+
+          if [ -f "$ANDROID_APP/build.gradle.kts" ]; then
+            GRADLE_FILE="$ANDROID_APP/build.gradle.kts"
+            IS_KTS=true
+          elif [ -f "$ANDROID_APP/build.gradle" ]; then
+            GRADLE_FILE="$ANDROID_APP/build.gradle"
+          fi
+
+          if [ -z "$GRADLE_FILE" ]; then
+            echo "build.gradle tidak ditemukan, skip."
+            exit 0
+          fi
+
+          echo "Editing: $GRADLE_FILE (kts=$IS_KTS)"
+
+          GRADLE_FILE="$GRADLE_FILE" IS_KTS="$IS_KTS" python3 << 'PYEOF'
+import re, os, sys
+
+gradle_file = os.environ.get("GRADLE_FILE")
+is_kts = os.environ.get("IS_KTS", "false").lower() == "true"
+
+if not gradle_file or not os.path.exists(gradle_file):
+    print("Gradle file tidak ada, skip.")
+    sys.exit(0)
+
+with open(gradle_file, "r", encoding="utf-8") as f:
+    content = f.read()
+
+if is_kts:
+    inject = """
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+"""
+else:
+    inject = """
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+"""
+
+pattern = re.compile(
+    r"(buildTypes\s*\{[\s\S]*?release\s*\{)([\s\S]*?)(\n\s*\})",
+    re.MULTILINE
+)
+
+match = pattern.search(content)
+
+if match:
+    start, body, end = match.group(1), match.group(2), match.group(3)
+
+    if is_kts:
+        body = re.sub(r"\s*isMinifyEnabled\s*=\s*\w+", "", body)
+        body = re.sub(r"\s*isShrinkResources\s*=\s*\w+", "", body)
+        body = re.sub(r"\s*proguardFiles\s*\([\s\S]*?\)", "", body)
+    else:
+        body = re.sub(r"\s*minifyEnabled\s+\w+", "", body)
+        body = re.sub(r"\s*shrinkResources\s+\w+", "", body)
+        body = re.sub(r"\s*proguardFiles[\s\S]*?(?=\n\s*\w|\n\s*\})", "", body)
+
+    new_content = content[:match.start()] + start + inject + body + end + content[match.end():]
+
+    with open(gradle_file, "w", encoding="utf-8") as f:
+        f.write(new_content)
+
+    print("build.gradle berhasil di-inject ProGuard!")
+else:
+    print("buildTypes/release tidak ditemukan, coba fallback...")
+
+    android_pattern = re.compile(r"(android\s*\{)", re.MULTILINE)
+    if android_pattern.search(content):
+        if is_kts:
+            new_block = """
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+"""
+        else:
+            new_block = """
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+"""
+        new_content = android_pattern.sub(r"\1" + new_block, content, count=1)
+
+        with open(gradle_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        print("Fallback: buildTypes ditambahkan manual")
+    else:
+        print("Blok android{} tidak ditemukan, gagal inject.")
+PYEOF
+
+          echo ""
+          echo "=== VERIFIKASI build.gradle ==="
+          grep -A 8 "release {" "$GRADLE_FILE" | head -n 15
+          echo ""
+          echo "==============================================="
+          echo "PROGUARD PROTECTION AKTIF!"
+          echo "==============================================="
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f "pubspec.yaml" ]; then
+            echo "=== Build APK (dengan ProGuard protection) ==="
+            flutter clean
+            flutter build apk --${{ github.event.inputs.build_type }}
+
+            echo ""
+            echo "=== Cek mapping.txt ==="
+            MAPPING=$(find . -name "mapping.txt" -path "*release*" 2>/dev/null | head -n 1)
+            if [ -n "$MAPPING" ]; then
+              echo "ProGuard mapping.txt: $MAPPING"
+              echo "PROGUARD_MAPPING=$MAPPING" >> $GITHUB_ENV
+            else
+              echo "mapping.txt tidak ditemukan."
+            fi
           else
-            echo "⚠️ Build tools not found, skip resign"
+            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+            GRADLE_DIR=$(dirname "$GRADLE_PATH")
+            cd "$GRADLE_DIR" && chmod +x gradlew
+            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+              ./gradlew assembleDebug
+            else
+              ./gradlew assembleRelease
+            fi
           fi
 
       - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          if [ -z "$APK_FOUND" ]; then
-            echo "❌ APK tidak ditemukan!"
-            exit 1
-          fi
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
           echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          ls -lh "$APK_FOUND"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -285,3 +377,15 @@ PROGUARD
           path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
+
+      - name: Upload ProGuard Mapping File
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proguard-mapping-${{ github.event.inputs.tag }}
+          path: |
+            ${{ env.PROJECT_DIR }}/**/mapping.txt
+            ${{ env.PROJECT_DIR }}/**/seeds.txt
+            ${{ env.PROJECT_DIR }}/**/usage.txt
+          retention-days: 30
+          if-no-files-found: ignore
