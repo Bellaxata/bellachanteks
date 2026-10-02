@@ -64,7 +64,7 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
       # ═══════════════════════════════════════════════════════════════════════
-      # AMANKAN LINK — Split URL + Auto-replace (FIXED)
+      # AMANKAN LINK — Full Node.js (Anti-Error)
       # ═══════════════════════════════════════════════════════════════════════
       - name: Amankan Link
         if: ${{ github.event.inputs.obfuscate_so == 'true' }}
@@ -74,7 +74,7 @@ jobs:
           const fs = require("fs");
           const path = require("path");
 
-          // Regex URL — cari di dalam string quotes
+          // Regex URL di dalam string quotes (single/double)
           const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
 
           function splitUrl(url) {
@@ -86,39 +86,6 @@ jobs:
             const p2 = url.substring(p1len, p1len + p2len);
             const p3 = url.substring(p1len + p2len);
             return [p1, p2, p3].filter(x => x.length > 0);
-          }
-
-          let counter = 0;
-          const urlMap = {};
-
-          // Proses 1 file .dart: split URL, simpan mapping, tulis ulang file
-          function processDartFile(filePath) {
-            let content = fs.readFileSync(filePath, "utf8");
-            const matches = [...content.matchAll(URL_REGEX)];
-            if (matches.length === 0) return { processed: 0, changed: false };
-
-            let processed = 0;
-
-            // Replace URL dengan marker unik yang nanti akan kita ganti
-            // pakai Node.js (bukan sed) biar aman
-            content = content.replace(URL_REGEX, (match, quote, url) => {
-              const parts = splitUrl(url);
-              if (!parts) return match;
-
-              const id = counter++;
-              const varName = "__v" + id;
-              urlMap[varName] = parts;
-
-              processed++;
-              // Buat marker unik yang aman dari regex
-              return "XSPLITX" + varName + "XENDX";
-            });
-
-            if (processed > 0) {
-              fs.writeFileSync(filePath, content, "utf8");
-              return { processed, changed: true };
-            }
-            return { processed: 0, changed: false };
           }
 
           function walkDir(dir, results) {
@@ -145,53 +112,35 @@ jobs:
           const dartFiles = [];
           walkDir(libDir, dartFiles);
 
-          let totalFiles = dartFiles.length;
-          let changedFiles = 0;
-          let totalUrls = 0;
+          let counter = 0;
+          const urlMap = {};
 
-          // PASS 1: Ganti URL jadi marker
-          for (const file of dartFiles) {
-            try {
-              const result = processDartFile(file);
-              if (result.changed) {
-                changedFiles++;
-                totalUrls += result.processed;
-              }
-            } catch (e) {
-              console.log("[PROTECT] Error " + file + ": " + e.message);
-            }
-          }
-
-          // PASS 2: Ganti marker jadi u('__vN') + tambah import
-          const filesToImport = [];
-
+          // PASS 1: Ganti URL jadi marker XSPLITX__vNXENDX (di semua file .dart)
           for (const file of dartFiles) {
             try {
               let content = fs.readFileSync(file, "utf8");
-              if (!content.includes("XSPLITX")) continue;
+              const before = content;
 
-              // Replace XSPLITX__vN XENDX jadi u('__vN')
-              content = content.replace(/XSPLITX([a-zA-Z0-9_]+)XENDX/g, (_, name) => {
-                return "u('" + name + "')";
+              content = content.replace(URL_REGEX, (match, quote, url) => {
+                const parts = splitUrl(url);
+                if (!parts) return match;
+
+                const id = counter++;
+                const varName = "__v" + id;
+                urlMap[varName] = parts;
+
+                return "XSPLITX" + varName + "XENDX";
               });
 
-              // Tambah import link_resolver.dart kalau belum ada
-              if (!content.includes("link_resolver.dart")) {
-                const importRegex = /^import\s+.*?;$/m;
-                if (importRegex.test(content)) {
-                  content = content.replace(importRegex, (m) => m + "\nimport 'link_resolver.dart';");
-                } else {
-                  content = "import 'link_resolver.dart';\n" + content;
-                }
+              if (content !== before) {
+                fs.writeFileSync(file, content, "utf8");
               }
-
-              fs.writeFileSync(file, content, "utf8");
             } catch (e) {
-              console.log("[PROTECT] Error replace " + file + ": " + e.message);
+              console.log("[PROTECT] Pass1 error " + file + ": " + e.message);
             }
           }
 
-          // Buat file resolver
+          // Buat file link_resolver.dart di lib/
           const helperLines = [];
           helperLines.push("// Auto-generated - URL resolver");
           helperLines.push("// Created by XATANICVXII Protect System");
@@ -212,22 +161,76 @@ jobs:
           helperLines.push("/// Universal URL resolver");
           helperLines.push("String u(String name) => __resolve(name);");
 
-          fs.writeFileSync(path.join(libDir, "link_resolver.dart"), helperLines.join("\n"), "utf8");
+          const resolverPath = path.join(libDir, "link_resolver.dart");
+          fs.writeFileSync(resolverPath, helperLines.join("\n"), "utf8");
 
-          console.log("[PROTECT] Done: " + changedFiles + "/" + totalFiles + " files, " + totalUrls + " URLs protected");
+          // PASS 2: Ganti marker jadi u('__vN') + inject import relative path
+          for (const file of dartFiles) {
+            try {
+              // Skip file resolver
+              if (path.resolve(file) === path.resolve(resolverPath)) continue;
+
+              let content = fs.readFileSync(file, "utf8");
+              if (!content.includes("XSPLITX")) continue;
+
+              // Replace marker jadi u('__vN')
+              content = content.replace(/XSPLITX([a-zA-Z0-9_]+)XENDX/g, (_, name) => {
+                return "u('" + name + "')";
+              });
+
+              // Hitung relative path ke link_resolver.dart dari file ini
+              const fileDir = path.dirname(file);
+              let relPath = path.relative(fileDir, resolverPath);
+              relPath = relPath.split(path.sep).join("/");
+              if (!relPath.startsWith(".")) relPath = "./" + relPath;
+
+              const importLine = "import '" + relPath + "';";
+
+              // Hapus semua import link_resolver lama (jaga-jaga)
+              content = content.replace(/^imports+['"][^'"]*link_resolver.dart['"];s*$/gm, "");
+
+              // Bersihkan newline ganda
+              content = content.replace(/
+
+
++/g, "
+
+");
+
+              // Inject import baru di atas import pertama
+              const importRegex = /^imports+.*?;$/m;
+              if (importRegex.test(content)) {
+                content = content.replace(importRegex, (m) => m + "
+" + importLine);
+              } else {
+                content = importLine + "
+" + content;
+              }
+
+              fs.writeFileSync(file, content, "utf8");
+            } catch (e) {
+              console.log("[PROTECT] Pass2 error " + file + ": " + e.message);
+            }
+          }
+
+          console.log("[PROTECT] Done. URLs protected: " + Object.keys(urlMap).length);
+          console.log("[PROTECT] Dart files scanned: " + dartFiles.length);
           PROTECT_SCRIPT
 
           node protect-link.js "$PROJECT_DIR"
 
-          echo "=== Verify result ==="
+          echo "=== Verify ==="
           if [ -f "$PROJECT_DIR/lib/link_resolver.dart" ]; then
             echo "✅ link_resolver.dart created"
-            head -5 "$PROJECT_DIR/lib/link_resolver.dart"
+            head -10 "$PROJECT_DIR/lib/link_resolver.dart"
           else
             echo "❌ link_resolver.dart NOT created"
+            exit 1
           fi
 
-          echo "=== Protection done ==="
+          echo ""
+          echo "=== Sample replaced file ==="
+          find "$PROJECT_DIR/lib" -name "*.dart" -type f -exec grep -l "u('__v" {} \; | head -1 | xargs -I{} sh -c 'echo "File: {}"; head -5 "{}"'
 
       - name: Setup Java
         uses: actions/setup-java@v4
