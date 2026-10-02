@@ -17,17 +17,14 @@ on:
         description: "Hanya jalankan analyze (true/false)"
         required: false
         default: "false"
-      obfuscate_so:
-        description: "Singkatkan Link (true/false)"
-        required: false
-        default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.configureondemand=true"
 
     steps:
       - name: Setup Node.js
@@ -38,21 +35,40 @@ jobs:
       - name: Download ZIP project
         run: |
           echo "=== Downloading ZIP ==="
+          echo "URL: ${{ github.event.inputs.zip_url }}"
+
           curl -L \
+            --retry 3 --retry-delay 2 --retry-connrefused \
+            --compressed \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip
-          ls -lh project.zip
+            -o project.zip \
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n=== Size: %{size_download} bytes ===\n"
 
-      - name: Extract ZIP
+          echo ""
+          echo "=== File Info ==="
+          ls -lh project.zip
+          echo ""
+          echo "=== File Type ==="
+          file project.zip
+
+      - name: Extract ZIP (auto-decompress)
         run: |
+          echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "File bukan ZIP valid!"
+            cat project.zip
             exit 1
           fi
-          unzip -q project.zip -d project_raw
+          echo "ZIP valid"
 
+          echo ""
+          echo "=== Extracting ZIP (unzip parallel-friendly) ==="
+          unzip -q project.zip -d project_raw
+          rm -f project.zip
+
+          echo "=== Mengunci Project Dir ==="
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
 
@@ -63,159 +79,29 @@ jobs:
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-          echo ""
-          echo "=== ISI PROJECT ==="
-          ls -la "$PROJECT_DIR"
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # SPLIT URL DI FILE .dart — Link Dibikin Singkat
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Singkatkan Link (Split URL)
-        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
-        run: |
-          echo "=== SINGKATKAN LINK DI .dart ==="
-          cat > split-link.js << 'SPLIT_SCRIPT'
-          const fs = require("fs");
-          const path = require("path");
-
-          // Regex cari URL di dalam string quotes
-          const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
-
-          function splitUrl(url) {
-            const len = url.length;
-            if (len < 6) return null;
-            const p1len = Math.ceil(len / 3);
-            const p2len = Math.ceil((len - p1len) / 2);
-            return [
-              url.substring(0, p1len),
-              url.substring(p1len, p1len + p2len),
-              url.substring(p1len + p2len)
-            ].filter(x => x.length > 0);
-          }
-
-          function walkDir(dir, results) {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-            for (const entry of entries) {
-              const fullPath = path.join(dir, entry.name);
-              if (entry.isDirectory()) {
-                if (["build", ".dart_tool", ".git", ".idea", "android", "ios", "linux", "macos", "windows", "web", ".vscode"].includes(entry.name)) continue;
-                walkDir(fullPath, results);
-              } else if (entry.isFile() && entry.name.endsWith(".dart")) {
-                results.push(fullPath);
-              }
-            }
-          }
-
-          const projectDir = process.argv[2];
-          const libDir = path.join(projectDir, "lib");
-          if (!fs.existsSync(libDir)) { console.log("Tidak ada lib/"); process.exit(0); }
-
-          const dartFiles = [];
-          walkDir(libDir, dartFiles);
-
-          let counter = 0;
-          const urlMap = {};
-
-          // PASS 1: Split URL → marker
-          for (const file of dartFiles) {
-            try {
-              let content = fs.readFileSync(file, "utf8");
-              const before = content;
-              content = content.replace(URL_REGEX, (m, q, url) => {
-                const parts = splitUrl(url);
-                if (!parts) return m;
-                const id = counter++;
-                const varName = "__s" + id;
-                urlMap[varName] = parts;
-                return "XSPLITX" + varName + "XENDX";
-              });
-              if (content !== before) fs.writeFileSync(file, content, "utf8");
-            } catch (e) { console.log("Pass1 error " + file + ": " + e.message); }
-          }
-
-          // Buat file helper link_resolver.dart
-          const helperLines = [];
-          helperLines.push("// Auto-generated Link Resolver");
-          helperLines.push("// Created by XATANICVXII");
-          helperLines.push("");
-          helperLines.push("const Map<String, List<String>> _parts = {");
-          for (const [name, parts] of Object.entries(urlMap)) {
-            helperLines.push("  " + JSON.stringify(name) + ": [" + parts.map(p => JSON.stringify(p)).join(", ") + "],");
-          }
-          helperLines.push("};");
-          helperLines.push("");
-          helperLines.push("String _combine(String name) {");
-          helperLines.push("  final p = _parts[name];");
-          helperLines.push("  if (p == null) return '';");
-          helperLines.push("  return p.join();");
-          helperLines.push("}");
-          helperLines.push("");
-          helperLines.push("String u(String name) => _combine(name);");
-
-          const resolverPath = path.join(libDir, "link_resolver.dart");
-          fs.writeFileSync(resolverPath, helperLines.join("\n"), "utf8");
-
-          // PASS 2: Replace marker → u('__sN') + inject import relative path
-          for (const file of dartFiles) {
-            try {
-              if (path.resolve(file) === path.resolve(resolverPath)) continue;
-              let content = fs.readFileSync(file, "utf8");
-              if (!content.includes("XSPLITX")) continue;
-
-              // Replace marker
-              content = content.replace(/XSPLITX([a-zA-Z0-9_]+)XENDX/g, (_, name) => {
-                return "u('" + name + "')";
-              });
-
-              // Hitung relative path ke link_resolver.dart
-              const fileDir = path.dirname(file);
-              let relPath = path.relative(fileDir, resolverPath).split(path.sep).join("/");
-              if (!relPath.startsWith(".")) relPath = "./" + relPath;
-              const importLine = "import '" + relPath + "';";
-
-              // Hapus import link_resolver lama kalau ada
-              content = content.replace(/^[ \t]*import\s+['"][^'"]*link_resolver\.dart['"];?[ \t]*\r?\n?/gm, "");
-
-              // Cari import terakhir
-              const lines = content.split("\n");
-              let lastImportIdx = -1;
-              for (let i = 0; i < lines.length; i++) {
-                const ln = lines[i].trim();
-                if (ln.startsWith("import ") && ln.endsWith(";")) {
-                  lastImportIdx = i;
-                }
-              }
-
-              if (lastImportIdx >= 0) {
-                lines.splice(lastImportIdx + 1, 0, importLine);
-              } else {
-                lines.unshift(importLine);
-              }
-
-              content = lines.join("\n");
-              fs.writeFileSync(file, content, "utf8");
-            } catch (e) { console.log("Pass2 error " + file + ": " + e.message); }
-          }
-
-          console.log("[SPLIT] Done. Links split: " + Object.keys(urlMap).length);
-          SPLIT_SCRIPT
-
-          node split-link.js "$PROJECT_DIR"
-
-          echo ""
-          echo "=== VERIFY ==="
-          if [ -f "$PROJECT_DIR/lib/link_resolver.dart" ]; then
-            echo "✅ link_resolver.dart created"
-            head -5 "$PROJECT_DIR/lib/link_resolver.dart"
-          else
-            echo "❌ link_resolver.dart NOT created"
-          fi
-
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
           java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Cache Pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
 
       - name: Setup Flutter
         uses: subosito/flutter-action@main
@@ -223,35 +109,6 @@ jobs:
           flutter-version: "3.41.9"
           channel: "stable"
           cache: true
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # VALIDASI & REGENERATE ANDROID (kalau tidak ada)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: Validate & Regenerate Android
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          echo "=== VALIDASI PROJECT ==="
-
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "❌ ERROR: pubspec.yaml tidak ditemukan!"
-            ls -la
-            exit 1
-          fi
-
-          echo "✅ pubspec.yaml OK"
-
-          if [ ! -d "android" ]; then
-            echo "⚠️ Folder android/ tidak ada — regenerate..."
-            flutter create --platforms=android .
-            echo "✅ android/ dibuat"
-          elif [ ! -f "android/gradlew" ]; then
-            echo "⚠️ android/gradlew tidak ada — regenerate..."
-            rm -rf android/
-            flutter create --platforms=android .
-            echo "✅ android/ di-regenerate"
-          else
-            echo "✅ android/ + gradlew OK"
-          fi
 
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
@@ -262,36 +119,54 @@ jobs:
             cat analyze_report.txt
             echo "[END_RESULT_ANALYZE]"
             rm -f analyze_report.txt
+          else
+            echo "[RESULT_ANALYZE]"
+            echo "pubspec.yaml tidak ditemukan."
+            echo "[END_RESULT_ANALYZE]"
           fi
 
       - name: Stop if Analyze Only
         if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: exit 1
 
-      - name: Get dependencies
+      - name: Get dependencies (fast)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            timeout 180s flutter pub get || echo "Lanjut..."
+            if [ -d ".dart_tool" ] && [ -f "pubspec.lock" ]; then
+              echo "Cache .dart_tool ada, skip flutter pub get"
+              flutter pub get --offline || flutter pub get
+            else
+              timeout 120s flutter pub get || echo "Lanjut..."
+            fi
           fi
 
-      - name: Build APK
+      - name: Build APK (optimized)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          echo "=== BUILD APK ==="
-          flutter build apk --${{ github.event.inputs.build_type }}
+          if [ -f "pubspec.yaml" ]; then
+            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+              flutter build apk --debug --no-tree-shake-icons
+            else
+              flutter build apk --release --split-per-abi
+            fi
+          else
+            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+            GRADLE_DIR=$(dirname "$GRADLE_PATH")
+            cd "$GRADLE_DIR" && chmod +x gradlew
+            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
+              ./gradlew assembleDebug --parallel --daemon
+            else
+              ./gradlew assembleRelease --parallel --daemon
+            fi
+          fi
 
       - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          if [ -z "$APK_FOUND" ]; then
-            echo "❌ APK tidak ditemukan!"
-            exit 1
-          fi
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
           echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
-          ls -lh "$APK_FOUND"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
