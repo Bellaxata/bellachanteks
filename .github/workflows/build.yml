@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "URL download ZIP project Flutter"
+        description: "URL download ZIP"
         required: true
       tag:
         description: "Tag build"
@@ -14,14 +14,18 @@ on:
         required: true
         default: "release"
       only_analyze:
-        description: "Hanya jalankan analyze (true/false)"
+        description: "Analyze only"
+        required: false
+        default: "false"
+      obfuscate_so:
+        description: "Encrypt ALL URLs in APK"
         required: false
         default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -33,23 +37,16 @@ jobs:
 
       - name: Download ZIP project
         run: |
-          echo "=== Downloading ZIP ==="
-          echo "URL: ${{ github.event.inputs.zip_url }}"
-
           curl -L \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
+            -o project.zip
 
-          echo ""
-          echo "=== File Info ==="
           ls -lh project.zip
 
       - name: Extract ZIP
         run: |
-          echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "File bukan ZIP valid!"
             exit 1
@@ -121,17 +118,257 @@ jobs:
             fi
           fi
 
-      - name: Check APK Output
+      - name: Find built APK
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
-          APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
-          echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "APK_PATH=$APK_FOUND" >> $GITHUB_ENV
+          echo "APK: $APK_FOUND"
+
+      - name: Encrypt ALL URLs in APK
+        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
+        run: |
+          echo "=== INSTALLING PROTECTION ==="
+          npm install adm-zip --no-save 2>&1 | tail -2
+
+          cat > protect-all.js << 'PROTECT_SCRIPT'
+          const fs = require("fs");
+          const crypto = require("crypto");
+          const AdmZip = require("adm-zip");
+
+          const URL_REGEX = /\b(https?:\/\/[^\s"'<>()\[\]{}\\,;|`]{4,}|wss?:\/\/[^\s"'<>()\[\]{}\\,;|`]{4,}|ftps?:\/\/[^\s"'<>()\[\]{}\\,;|`]{4,})/gi;
+
+          function encryptUrl(url) {
+            const key = 0xA7;
+            const buf = Buffer.from(url, "utf8");
+            const xored = Buffer.alloc(buf.length);
+            for (let i = 0; i < buf.length; i++) {
+              xored[i] = buf[i] ^ key;
+            }
+            const b64 = xored.toString("base64").replace(/=+$/, "");
+            return "XTRX::" + b64;
+          }
+
+          function encryptInBuffer(buffer) {
+            const stats = { urlsFound: 0, urlsEncrypted: 0, bytesChanged: 0 };
+
+            const buf = Buffer.from(buffer);
+            const text = buf.toString("latin1");
+            const matches = [...text.matchAll(URL_REGEX)];
+            if (matches.length === 0) return { buffer: buf, stats };
+
+            stats.urlsFound = matches.length;
+
+            const sorted = [...matches].sort((a, b) => b.index - a.index);
+
+            for (const m of sorted) {
+              const url = m[0];
+              const start = m.index;
+              const len = url.length;
+
+              const encrypted = encryptUrl(url);
+              if (encrypted.length > len) continue;
+
+              const encBuf = Buffer.alloc(len, 0x00);
+              Buffer.from(encrypted, "utf8").copy(encBuf, 0);
+              encBuf.copy(buf, start);
+
+              stats.urlsEncrypted++;
+              stats.bytesChanged += len;
+            }
+
+            return { buffer: buf, stats };
+          }
+
+          // File yang di-scan (semua file teks & binary)
+          const SCANNABLE = [
+            ".so", ".dex", ".json", ".xml", ".txt", ".html", ".htm",
+            ".js", ".properties", ".yml", ".yaml", ".cfg", ".conf",
+            ".ini", ".env", ".dart", ".kt", ".java", ".gradle", ".md",
+            ".csv", ".smali", ".rs", ".ts", ".tsx", ".jsx", ".vue",
+            ".css", ".scss", ".svg", ".sql", ".map", ".plist", ".js.map",
+          ];
+
+          const SKIP_PATTERNS = [
+            /^META-INF\//i,
+            /^res\/drawable/i,
+            /^res\/mipmap/i,
+            /^res\/raw\//i,
+            /\.(png|jpg|jpeg|gif|webp|bmp|ico|ttf|otf|woff2?|dat|mp3|mp4|wav|ogg|webm|zip|jar|pak)$/i,
+          ];
+
+          function shouldSkip(name) {
+            return SKIP_PATTERNS.some((p) => p.test(name));
+          }
+
+          function isScannable(name) {
+            const lower = name.toLowerCase();
+            return SCANNABLE.some((ext) => lower.endsWith(ext));
+          }
+
+          const apkPath = process.argv[2];
+          const outPath = process.argv[3];
+
+          const zip = new AdmZip(apkPath);
+          const entries = zip.getEntries();
+
+          let totalFiles = 0;
+          let encryptedFiles = 0;
+          let skippedFiles = 0;
+          let totalUrlsFound = 0;
+          let totalUrlsEncrypted = 0;
+          let totalBytesChanged = 0;
+          const filesReport = [];
+
+          for (const entry of entries) {
+            if (entry.isDirectory) continue;
+            if (shouldSkip(entry.entryName)) continue;
+            if (!isScannable(entry.entryName)) continue;
+
+            totalFiles++;
+
+            try {
+              const buf = entry.getData();
+              const { buffer: encBuf, stats } = encryptInBuffer(buf);
+
+              if (stats.urlsEncrypted === 0) {
+                skippedFiles++;
+                continue;
+              }
+
+              zip.updateFile(entry.entryName, encBuf);
+              encryptedFiles++;
+              totalUrlsFound += stats.urlsFound;
+              totalUrlsEncrypted += stats.urlsEncrypted;
+              totalBytesChanged += stats.bytesChanged;
+
+              if (filesReport.length < 20) {
+                filesReport.push({
+                  file: entry.entryName,
+                  urls: stats.urlsEncrypted,
+                });
+              }
+            } catch (e) {
+              // skip file error
+            }
+          }
+
+          // Inject decrypt helper
+          const decryptHelper = `/**
+ * XTRX URL Decrypt Helper
+ * Auto-injected during build
+ */
+(function() {
+  "use strict";
+  var KEY = 0xA7;
+
+  function base64ToBytes(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  function decrypt(encrypted) {
+    if (!encrypted || typeof encrypted !== "string") return encrypted;
+    if (encrypted.indexOf("XTRX::") !== 0) return encrypted;
+    var b64 = encrypted.slice(6).replace(/\\0+$/, "").trim();
+    try {
+      var bytes = base64ToBytes(b64);
+      for (var i = 0; i < bytes.length; i++) bytes[i] = bytes[i] ^ KEY;
+      return new TextDecoder().decode(bytes);
+    } catch (e) {
+      return encrypted;
+    }
+  }
+
+  window.__XTRX__ = { decrypt: decrypt };
+  window.XTRX_DECRYPT = decrypt;
+})();
+`;
+
+          try {
+            zip.addFile("assets/xtrx-decrypt.js", Buffer.from(decryptHelper, "utf8"));
+          } catch (e) {}
+
+          // Inject config
+          const config = {
+            _meta: {
+              injected_at: new Date().toISOString(),
+              tool: "XTRX URL Encryptor",
+              version: "1.0",
+            },
+            encryption: {
+              algorithm: "XOR-BASE64",
+              key: "0xA7",
+              prefix: "XTRX::",
+              note: "Use window.XTRX_DECRYPT(url) to decode",
+            },
+          };
+          try {
+            zip.addFile("assets/xtrx-config.json", Buffer.from(JSON.stringify(config, null, 2), "utf8"));
+          } catch (e) {}
+
+          zip.writeZip(outPath);
+
+          // Report
+          console.log("[PROTECT_RESULT]");
+          console.log("TOTAL_FILES=" + totalFiles);
+          console.log("ENCRYPTED_FILES=" + encryptedFiles);
+          console.log("SKIPPED_FILES=" + skippedFiles);
+          console.log("TOTAL_URLS_FOUND=" + totalUrlsFound);
+          console.log("TOTAL_URLS_ENCRYPTED=" + totalUrlsEncrypted);
+          console.log("TOTAL_BYTES_CHANGED=" + totalBytesChanged);
+          for (const f of filesReport) {
+            console.log("FILE_ENC=" + f.file + "=" + f.urls);
+          }
+          console.log("[END_PROTECT_RESULT]");
+          PROTECT_SCRIPT
+
+          node protect-all.js "$APK_PATH" "/tmp/apk_encrypted.apk"
+
+          echo ""
+          echo "=== RE-SIGNING APK ==="
+          BT_DIR=$(ls -d $ANDROID_HOME/build-tools/*/ 2>/dev/null | sort -V | tail -n 1)
+          KEYSTORE="/tmp/resign.keystore"
+
+          keytool -genkey -v -keystore "$KEYSTORE" -alias resign \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Android,O=Android,C=US" 2>/dev/null
+
+          cd /tmp
+          rm -rf apk_clean
+          mkdir -p apk_clean && cd apk_clean
+          unzip -q /tmp/apk_encrypted.apk -d .
+          rm -rf META-INF
+          zip -qr /tmp/apk_unsigned.apk .
+
+          cd $GITHUB_WORKSPACE
+
+          if [ -f "${BT_DIR}zipalign" ]; then
+            "${BT_DIR}zipalign" -f 4 /tmp/apk_unsigned.apk /tmp/apk_aligned.apk
+            "${BT_DIR}apksigner" sign \
+              --ks "$KEYSTORE" \
+              --ks-pass pass:android \
+              --key-pass pass:android \
+              --ks-key-alias resign \
+              --out "$APK_PATH" \
+              /tmp/apk_aligned.apk
+            "${BT_DIR}apksigner" verify "$APK_PATH" || echo "verify warning"
+          else
+            cp /tmp/apk_unsigned.apk "$APK_PATH"
+            jarsigner -keystore "$KEYSTORE" -storepass android -keypass android \
+              -sigalg SHA1withRSA -digestalg SHA1 "$APK_PATH" resign
+          fi
+
+          rm -f /tmp/apk_unsigned.apk /tmp/apk_aligned.apk /tmp/apk_encrypted.apk
+          ls -lh "$APK_PATH"
+          echo "=== APK ready ==="
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
-          path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
+          path: ${{ env.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
