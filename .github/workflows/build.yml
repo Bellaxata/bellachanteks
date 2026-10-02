@@ -18,7 +18,7 @@ on:
         required: false
         default: "false"
       obfuscate_so:
-        description: "Protect URL in Dart source (true/false)"
+        description: "Protect URL (true/false)"
         required: false
         default: "false"
 
@@ -67,20 +67,18 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
       # ═══════════════════════════════════════════════════════════════════════
-      # PROTECT URL — Encrypt URLs in Dart Source (before compile)
+      # PROTECT URL — Encrypt URL di Dart Source sebelum compile
       # ═══════════════════════════════════════════════════════════════════════
       - name: Protect URL in Dart Source
         if: ${{ github.event.inputs.obfuscate_so == 'true' }}
         run: |
           echo "=== INSTALLING PROTECTION ==="
-          echo "🔒 Encrypting URLs in Dart source..."
-
           cat > protect-dart.js << 'PROTECT_SCRIPT'
           const fs = require("fs");
           const path = require("path");
-          const crypto = require("crypto");
 
-          const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>]+?|wss?:\/\/[^\s"'<>]+?|ftps?:\/\/[^\s"'<>]+?)\1/g;
+          // Regex cari URL di dalam string quotes
+          const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
 
           function encryptUrl(url) {
             const key = 0xA7;
@@ -89,7 +87,11 @@ jobs:
             for (let i = 0; i < buf.length; i++) {
               xored[i] = buf[i] ^ key;
             }
-            const b64 = xored.toString("base64").replace(/=+$/, "");
+            // URL-safe base64
+            const b64 = xored.toString("base64")
+              .replace(/\+/g, "-")
+              .replace(/\//g, "_")
+              .replace(/=+$/, "");
             return "XTRX::" + b64;
           }
 
@@ -107,16 +109,14 @@ jobs:
             });
 
             if (changed) {
-              // Inject import decrypt helper
+              // Inject import helper
               const importLine = "import 'xtrx_decrypt.dart';";
               if (!content.includes("xtrx_decrypt.dart")) {
-                const importRegex = /^imports+.*?;$/m;
+                const importRegex = /^import\s+.*?;$/m;
                 if (importRegex.test(content)) {
-                  content = content.replace(importRegex, (m) => m + "
-" + importLine);
+                  content = content.replace(importRegex, (m) => m + "\n" + importLine);
                 } else {
-                  content = importLine + "
-" + content;
+                  content = importLine + "\n" + content;
                 }
               }
               fs.writeFileSync(filePath, content, "utf8");
@@ -142,7 +142,7 @@ jobs:
           const libDir = path.join(projectDir, "lib");
 
           if (!fs.existsSync(libDir)) {
-            console.log("[ENCRYPT] Tidak ada folder lib/, skip");
+            console.log("[PROTECT] Tidak ada folder lib/, skip");
             process.exit(0);
           }
 
@@ -161,18 +161,20 @@ jobs:
                 totalUrls += result.urls.length;
               }
             } catch (e) {
-              console.log("[ENCRYPT] Error " + file + ": " + e.message);
+              console.log("[PROTECT] Error " + file + ": " + e.message);
             }
           }
 
-          // Buat file decrypt helper
-          const decryptHelper = `// Auto-generated
+          // Buat file decrypt helper di lib/
+          const decryptHelper = `// Auto-generated XTRX Decrypt Helper
 const int _XTRX_KEY = 0xA7;
 const String _XTRX_PREFIX = "XTRX::";
 
 String xtrxDecrypt(String encrypted) {
   if (!encrypted.startsWith(_XTRX_PREFIX)) return encrypted;
   String b64 = encrypted.substring(_XTRX_PREFIX.length);
+  // Restore URL-safe
+  b64 = b64.replaceAll("-", "+").replaceAll("_", "/");
   while (b64.length % 4 != 0) b64 += "=";
   List<int> bytes;
   try { bytes = _base64Decode(b64); } catch (e) { return encrypted; }
@@ -212,11 +214,7 @@ List<int> _base64Decode(String input) {
 
           fs.writeFileSync(path.join(libDir, "xtrx_decrypt.dart"), decryptHelper, "utf8");
 
-          console.log("[PROTECT_RESULT]");
-          console.log("TOTAL_DART_FILES=" + totalFiles);
-          console.log("ENCRYPTED_FILES=" + encryptedFiles);
-          console.log("TOTAL_URLS_ENCRYPTED=" + totalUrls);
-          console.log("[END_PROTECT_RESULT]");
+          console.log("[PROTECT] Encrypted " + encryptedFiles + "/" + totalFiles + " files, " + totalUrls + " URLs");
           PROTECT_SCRIPT
 
           node protect-dart.js "$PROJECT_DIR"
