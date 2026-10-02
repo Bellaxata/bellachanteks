@@ -16,31 +16,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
     steps:
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-web2apk-${{ runner.os }}-${{ hashFiles('**/*.gradle*') }}
-          restore-keys: |
-            gradle-web2apk-${{ runner.os }}-
-
-      - name: Cache Pub
-        uses: actions/cache@v4
-        with:
-          path: ~/.pub-cache
-          key: pub-web2apk-${{ runner.os }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -203,7 +184,7 @@ jobs:
         run: |
           mkdir -p myapp/assets/icon
           sudo apt-get install -y imagemagick
-          curl -L --retry 3 --retry-delay 2 \
+          curl -L \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.icon_url }}" \
@@ -221,8 +202,8 @@ jobs:
           EOF
           cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
 
-      - name: Build APK (optimized)
-        run: cd myapp && flutter build apk --release --split-per-abi
+      - name: Build APK
+        run: cd myapp && flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
