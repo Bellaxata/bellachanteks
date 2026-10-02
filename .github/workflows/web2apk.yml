@@ -204,7 +204,7 @@ jobs:
 
       - name: Inject ProGuard Protection
         run: |
-          echo "PROGUARD PROTECTION INJECTOR AKTIF (Web2APK)"
+          echo "PROGUARD INJECTOR AKTIF (Web2APK)"
 
           ANDROID_APP="myapp/android/app"
 
