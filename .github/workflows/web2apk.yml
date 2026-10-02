@@ -16,12 +16,31 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
     steps:
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-web2apk-${{ runner.os }}-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            gradle-web2apk-${{ runner.os }}-
+
+      - name: Cache Pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-web2apk-${{ runner.os }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -85,13 +104,25 @@ jobs:
             State<SplashScreen> createState() => _SplashScreenState();
           }
 
-          class _SplashScreenState extends State<SplashScreen> {
+          class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
+            late AnimationController _fadeController;
+            late AnimationController _scaleController;
+            late AnimationController _dotController;
+            late Animation<double> _fadeAnim;
+            late Animation<double> _scaleAnim;
             bool _isChecking = false;
             bool _dialogShown = false;
 
             @override
             void initState() {
               super.initState();
+              _fadeController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+              _scaleController = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+              _dotController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))..repeat();
+              _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(parent: _fadeController, curve: Curves.easeOut));
+              _scaleAnim = Tween<double>(begin: 0.75, end: 1.0).animate(CurvedAnimation(parent: _scaleController, curve: Curves.easeOutBack));
+              _fadeController.forward();
+              _scaleController.forward();
               Timer(const Duration(milliseconds: 1500), () => _checkConnectionAndNavigate());
             }
 
@@ -125,6 +156,9 @@ jobs:
                 ),
               );
             }
+
+            @override
+            void dispose() { _fadeController.dispose(); _scaleController.dispose(); _dotController.dispose(); super.dispose(); }
 
             @override
             Widget build(BuildContext context) {
@@ -169,7 +203,7 @@ jobs:
         run: |
           mkdir -p myapp/assets/icon
           sudo apt-get install -y imagemagick
-          curl -L \
+          curl -L --retry 3 --retry-delay 2 \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.icon_url }}" \
@@ -187,8 +221,8 @@ jobs:
           EOF
           cd myapp && dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
 
-      - name: Build APK
-        run: cd myapp && flutter build apk --release
+      - name: Build APK (optimized)
+        run: cd myapp && flutter build apk --release --split-per-abi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
