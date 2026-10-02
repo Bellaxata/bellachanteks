@@ -18,7 +18,7 @@ on:
         required: false
         default: "false"
       obfuscate_so:
-        description: "Protect URL (true/false)"
+        description: "Amankan URL (true/false)"
         required: false
         default: "false"
 
@@ -42,11 +42,9 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n"
+            -o project.zip
 
           ls -lh project.zip
-          file project.zip
 
       - name: Extract ZIP
         run: |
@@ -67,62 +65,55 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
       # ═══════════════════════════════════════════════════════════════════════
-      # PROTECT URL — Encrypt URL di Dart Source sebelum compile
+      # AMANKAN LINK — Split URL jadi beberapa bagian
       # ═══════════════════════════════════════════════════════════════════════
-      - name: Protect URL in Dart Source
+      - name: Amankan Link
         if: ${{ github.event.inputs.obfuscate_so == 'true' }}
         run: |
-          echo "=== INSTALLING PROTECTION ==="
-          cat > protect-dart.js << 'PROTECT_SCRIPT'
+          echo "=== AMANKAN LINK ==="
+          cat > protect-link.js << 'PROTECT_SCRIPT'
           const fs = require("fs");
           const path = require("path");
 
-          // Regex cari URL di dalam string quotes
           const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
 
-          function encryptUrl(url) {
-            const key = 0xA7;
-            const buf = Buffer.from(url, "utf8");
-            const xored = Buffer.alloc(buf.length);
-            for (let i = 0; i < buf.length; i++) {
-              xored[i] = buf[i] ^ key;
-            }
-            // URL-safe base64
-            const b64 = xored.toString("base64")
-              .replace(/\+/g, "-")
-              .replace(/\//g, "_")
-              .replace(/=+$/, "");
-            return "XTRX::" + b64;
+          function splitUrl(url) {
+            const len = url.length;
+            if (len < 6) return null;
+            const p1len = Math.ceil(len / 3);
+            const p2len = Math.ceil((len - p1len) / 2);
+            const p1 = url.substring(0, p1len);
+            const p2 = url.substring(p1len, p1len + p2len);
+            const p3 = url.substring(p1len + p2len);
+            return [p1, p2, p3].filter(x => x.length > 0);
           }
 
-          function encryptDartFile(filePath) {
+          let counter = 0;
+          const urlMap = {};
+
+          function processDartFile(filePath) {
             let content = fs.readFileSync(filePath, "utf8");
-            let changed = false;
-            const foundUrls = [];
+            const matches = [...content.matchAll(URL_REGEX)];
+            if (matches.length === 0) return 0;
+
+            let processed = 0;
 
             content = content.replace(URL_REGEX, (match, quote, url) => {
-              if (url.startsWith("XTRX::")) return match;
-              const encrypted = encryptUrl(url);
-              foundUrls.push(url);
-              changed = true;
-              return quote + encrypted + quote;
+              const parts = splitUrl(url);
+              if (!parts) return match;
+
+              const id = counter++;
+              const varName = "__v" + id;
+              urlMap[varName] = parts;
+
+              processed++;
+              return quote + "XSPLITX" + varName + "XENDX" + quote;
             });
 
-            if (changed) {
-              // Inject import helper
-              const importLine = "import 'xtrx_decrypt.dart';";
-              if (!content.includes("xtrx_decrypt.dart")) {
-                const importRegex = /^import\s+.*?;$/m;
-                if (importRegex.test(content)) {
-                  content = content.replace(importRegex, (m) => m + "\n" + importLine);
-                } else {
-                  content = importLine + "\n" + content;
-                }
-              }
+            if (processed > 0) {
               fs.writeFileSync(filePath, content, "utf8");
             }
-
-            return { changed, urls: foundUrls };
+            return processed;
           }
 
           function walkDir(dir, results) {
@@ -150,74 +141,66 @@ jobs:
           walkDir(libDir, dartFiles);
 
           let totalFiles = dartFiles.length;
-          let encryptedFiles = 0;
+          let changedFiles = 0;
           let totalUrls = 0;
 
           for (const file of dartFiles) {
             try {
-              const result = encryptDartFile(file);
-              if (result.changed) {
-                encryptedFiles++;
-                totalUrls += result.urls.length;
+              const count = processDartFile(file);
+              if (count > 0) {
+                changedFiles++;
+                totalUrls += count;
               }
             } catch (e) {
               console.log("[PROTECT] Error " + file + ": " + e.message);
             }
           }
 
-          // Buat file decrypt helper di lib/
-          const decryptHelper = `// Auto-generated XTRX Decrypt Helper
-const int _XTRX_KEY = 0xA7;
-const String _XTRX_PREFIX = "XTRX::";
+          const helperLines = [];
+          helperLines.push("// Auto-generated - URL resolver");
+          helperLines.push("// Created by XATANICVXII Protect System");
+          helperLines.push("");
+          helperLines.push("const Map<String, List<String>> _linkParts = {");
+          for (const [name, parts] of Object.entries(urlMap)) {
+            const partsStr = parts.map(p => JSON.stringify(p)).join(", ");
+            helperLines.push("  " + JSON.stringify(name) + ": [" + partsStr + "],");
+          }
+          helperLines.push("};");
+          helperLines.push("");
+          helperLines.push("String __resolve(String name) {");
+          helperLines.push("  final parts = _linkParts[name];");
+          helperLines.push("  if (parts == null) return '';");
+          helperLines.push("  return parts.join('');");
+          helperLines.push("}");
+          helperLines.push("");
+          helperLines.push("/// Universal URL resolver");
+          helperLines.push("String u(String name) => __resolve(name);");
 
-String xtrxDecrypt(String encrypted) {
-  if (!encrypted.startsWith(_XTRX_PREFIX)) return encrypted;
-  String b64 = encrypted.substring(_XTRX_PREFIX.length);
-  // Restore URL-safe
-  b64 = b64.replaceAll("-", "+").replaceAll("_", "/");
-  while (b64.length % 4 != 0) b64 += "=";
-  List<int> bytes;
-  try { bytes = _base64Decode(b64); } catch (e) { return encrypted; }
-  for (int i = 0; i < bytes.length; i++) bytes[i] = bytes[i] ^ _XTRX_KEY;
-  return String.fromCharCodes(bytes);
-}
+          fs.writeFileSync(path.join(libDir, "link_resolver.dart"), helperLines.join("\n"), "utf8");
 
-String x(String encrypted) => xtrxDecrypt(encrypted);
-
-const String _b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-List<int> _base64Decode(String input) {
-  final result = <int>[];
-  final buffer = <int>[];
-  for (int i = 0; i < input.length; i++) {
-    final c = input[i];
-    if (c == '=') break;
-    final idx = _b64chars.indexOf(c);
-    if (idx < 0) continue;
-    buffer.add(idx);
-    if (buffer.length == 4) {
-      result.add((buffer[0] << 2) | (buffer[1] >> 4));
-      result.add(((buffer[1] & 0xF) << 4) | (buffer[2] >> 2));
-      result.add(((buffer[2] & 0x3) << 6) | buffer[3]);
-      buffer.clear();
-    }
-  }
-  if (buffer.length == 2) {
-    result.add((buffer[0] << 2) | (buffer[1] >> 4));
-  } else if (buffer.length == 3) {
-    result.add((buffer[0] << 2) | (buffer[1] >> 4));
-    result.add(((buffer[1] & 0xF) << 4) | (buffer[2] >> 2));
-  }
-  return result;
-}
-`;
-
-          fs.writeFileSync(path.join(libDir, "xtrx_decrypt.dart"), decryptHelper, "utf8");
-
-          console.log("[PROTECT] Encrypted " + encryptedFiles + "/" + totalFiles + " files, " + totalUrls + " URLs");
+          console.log("[PROTECT] Done: " + changedFiles + "/" + totalFiles + " files, " + totalUrls + " URLs protected");
           PROTECT_SCRIPT
 
-          node protect-dart.js "$PROJECT_DIR"
+          node protect-link.js "$PROJECT_DIR"
+
+          echo "=== Applying replacement ==="
+          find "$PROJECT_DIR/lib" -name "*.dart" -type f -exec sh -c '
+            for f; do
+              if grep -q "XSPLITX" "$f"; then
+                sed -i "s/XSPLITX\([a-zA-Z0-9_]*\)XENDX/u(\x27\1\x27)/g" "$f"
+              fi
+            done
+          ' _ {} +
+
+          echo "=== Adding imports ==="
+          find "$PROJECT_DIR/lib" -name "*.dart" -type f -exec sh -c '
+            for f; do
+              if grep -q "u(\x27" "$f" && ! grep -q "link_resolver.dart" "$f" && [ "$(basename $f)" != "link_resolver.dart" ]; then
+                sed -i "1i import 'link_resolver.dart';" "$f"
+              fi
+            done
+          ' _ {} +
+
           echo "=== Protection done ==="
 
       - name: Setup Java
