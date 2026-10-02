@@ -17,11 +17,15 @@ on:
         description: "Hanya jalankan analyze (true/false)"
         required: false
         default: "false"
+      obfuscate_so:
+        description: "Singkatkan Link (true/false)"
+        required: false
+        default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
@@ -34,43 +38,21 @@ jobs:
       - name: Download ZIP project
         run: |
           echo "=== Downloading ZIP ==="
-          echo "URL: ${{ github.event.inputs.zip_url }}"
-
           curl -L \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
-            -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
-
-          echo ""
-          echo "=== File Info ==="
+            -o project.zip
           ls -lh project.zip
-          echo ""
-          echo "=== File Type ==="
-          file project.zip
-          echo ""
-          echo "=== First Bytes ==="
-          xxd project.zip | head -2
 
       - name: Extract ZIP
         run: |
-          echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "File bukan ZIP valid!"
-            echo ""
-            echo "=== Isi file ==="
-            cat project.zip
             exit 1
           fi
-          echo "ZIP valid"
-
-          echo ""
-          echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
 
-          echo ""
-          echo "=== Mengunci Project Dir ==="
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
 
@@ -80,6 +62,154 @@ jobs:
             PROJECT_DIR="project_raw"
           fi
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+          echo ""
+          echo "=== ISI PROJECT ==="
+          ls -la "$PROJECT_DIR"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # SPLIT URL DI FILE .dart — Link Dibikin Singkat
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Singkatkan Link (Split URL)
+        if: ${{ github.event.inputs.obfuscate_so == 'true' }}
+        run: |
+          echo "=== SINGKATKAN LINK DI .dart ==="
+          cat > split-link.js << 'SPLIT_SCRIPT'
+          const fs = require("fs");
+          const path = require("path");
+
+          // Regex cari URL di dalam string quotes
+          const URL_REGEX = /(["'])(https?:\/\/[^\s"'<>\\]+?|wss?:\/\/[^\s"'<>\\]+?|ftps?:\/\/[^\s"'<>\\]+?)\1/g;
+
+          function splitUrl(url) {
+            const len = url.length;
+            if (len < 6) return null;
+            const p1len = Math.ceil(len / 3);
+            const p2len = Math.ceil((len - p1len) / 2);
+            return [
+              url.substring(0, p1len),
+              url.substring(p1len, p1len + p2len),
+              url.substring(p1len + p2len)
+            ].filter(x => x.length > 0);
+          }
+
+          function walkDir(dir, results) {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+              const fullPath = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                if (["build", ".dart_tool", ".git", ".idea", "android", "ios", "linux", "macos", "windows", "web", ".vscode"].includes(entry.name)) continue;
+                walkDir(fullPath, results);
+              } else if (entry.isFile() && entry.name.endsWith(".dart")) {
+                results.push(fullPath);
+              }
+            }
+          }
+
+          const projectDir = process.argv[2];
+          const libDir = path.join(projectDir, "lib");
+          if (!fs.existsSync(libDir)) { console.log("Tidak ada lib/"); process.exit(0); }
+
+          const dartFiles = [];
+          walkDir(libDir, dartFiles);
+
+          let counter = 0;
+          const urlMap = {};
+
+          // PASS 1: Split URL → marker
+          for (const file of dartFiles) {
+            try {
+              let content = fs.readFileSync(file, "utf8");
+              const before = content;
+              content = content.replace(URL_REGEX, (m, q, url) => {
+                const parts = splitUrl(url);
+                if (!parts) return m;
+                const id = counter++;
+                const varName = "__s" + id;
+                urlMap[varName] = parts;
+                return "XSPLITX" + varName + "XENDX";
+              });
+              if (content !== before) fs.writeFileSync(file, content, "utf8");
+            } catch (e) { console.log("Pass1 error " + file + ": " + e.message); }
+          }
+
+          // Buat file helper link_resolver.dart
+          const helperLines = [];
+          helperLines.push("// Auto-generated Link Resolver");
+          helperLines.push("// Created by XATANICVXII");
+          helperLines.push("");
+          helperLines.push("const Map<String, List<String>> _parts = {");
+          for (const [name, parts] of Object.entries(urlMap)) {
+            helperLines.push("  " + JSON.stringify(name) + ": [" + parts.map(p => JSON.stringify(p)).join(", ") + "],");
+          }
+          helperLines.push("};");
+          helperLines.push("");
+          helperLines.push("String _combine(String name) {");
+          helperLines.push("  final p = _parts[name];");
+          helperLines.push("  if (p == null) return '';");
+          helperLines.push("  return p.join();");
+          helperLines.push("}");
+          helperLines.push("");
+          helperLines.push("String u(String name) => _combine(name);");
+
+          const resolverPath = path.join(libDir, "link_resolver.dart");
+          fs.writeFileSync(resolverPath, helperLines.join("\n"), "utf8");
+
+          // PASS 2: Replace marker → u('__sN') + inject import relative path
+          for (const file of dartFiles) {
+            try {
+              if (path.resolve(file) === path.resolve(resolverPath)) continue;
+              let content = fs.readFileSync(file, "utf8");
+              if (!content.includes("XSPLITX")) continue;
+
+              // Replace marker
+              content = content.replace(/XSPLITX([a-zA-Z0-9_]+)XENDX/g, (_, name) => {
+                return "u('" + name + "')";
+              });
+
+              // Hitung relative path ke link_resolver.dart
+              const fileDir = path.dirname(file);
+              let relPath = path.relative(fileDir, resolverPath).split(path.sep).join("/");
+              if (!relPath.startsWith(".")) relPath = "./" + relPath;
+              const importLine = "import '" + relPath + "';";
+
+              // Hapus import link_resolver lama kalau ada
+              content = content.replace(/^[ \t]*import\s+['"][^'"]*link_resolver\.dart['"];?[ \t]*\r?\n?/gm, "");
+
+              // Cari import terakhir
+              const lines = content.split("\n");
+              let lastImportIdx = -1;
+              for (let i = 0; i < lines.length; i++) {
+                const ln = lines[i].trim();
+                if (ln.startsWith("import ") && ln.endsWith(";")) {
+                  lastImportIdx = i;
+                }
+              }
+
+              if (lastImportIdx >= 0) {
+                lines.splice(lastImportIdx + 1, 0, importLine);
+              } else {
+                lines.unshift(importLine);
+              }
+
+              content = lines.join("\n");
+              fs.writeFileSync(file, content, "utf8");
+            } catch (e) { console.log("Pass2 error " + file + ": " + e.message); }
+          }
+
+          console.log("[SPLIT] Done. Links split: " + Object.keys(urlMap).length);
+          SPLIT_SCRIPT
+
+          node split-link.js "$PROJECT_DIR"
+
+          echo ""
+          echo "=== VERIFY ==="
+          if [ -f "$PROJECT_DIR/lib/link_resolver.dart" ]; then
+            echo "✅ link_resolver.dart created"
+            head -5 "$PROJECT_DIR/lib/link_resolver.dart"
+          else
+            echo "❌ link_resolver.dart NOT created"
+          fi
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -94,6 +224,35 @@ jobs:
           channel: "stable"
           cache: true
 
+      # ═══════════════════════════════════════════════════════════════════════
+      # VALIDASI & REGENERATE ANDROID (kalau tidak ada)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Validate & Regenerate Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "=== VALIDASI PROJECT ==="
+
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "❌ ERROR: pubspec.yaml tidak ditemukan!"
+            ls -la
+            exit 1
+          fi
+
+          echo "✅ pubspec.yaml OK"
+
+          if [ ! -d "android" ]; then
+            echo "⚠️ Folder android/ tidak ada — regenerate..."
+            flutter create --platforms=android .
+            echo "✅ android/ dibuat"
+          elif [ ! -f "android/gradlew" ]; then
+            echo "⚠️ android/gradlew tidak ada — regenerate..."
+            rm -rf android/
+            flutter create --platforms=android .
+            echo "✅ android/ di-regenerate"
+          else
+            echo "✅ android/ + gradlew OK"
+          fi
+
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -103,10 +262,6 @@ jobs:
             cat analyze_report.txt
             echo "[END_RESULT_ANALYZE]"
             rm -f analyze_report.txt
-          else
-            echo "[RESULT_ANALYZE]"
-            echo "pubspec.yaml tidak ditemukan."
-            echo "[END_RESULT_ANALYZE]"
           fi
 
       - name: Stop if Analyze Only
@@ -117,431 +272,26 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            timeout 120s flutter pub get || echo "Lanjut..."
+            timeout 180s flutter pub get || echo "Lanjut..."
           fi
-
-      - name: Inject ProGuard + Hardening Protection
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          echo "PROGUARD + HARDENING INJECTOR AKTIF"
-          echo ""
-
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "Bukan project Flutter, skip."
-            exit 0
-          fi
-
-          ANDROID_APP=""
-          for CANDIDATE in "android/app" "app"; do
-            if [ -d "$CANDIDATE" ]; then
-              ANDROID_APP="$CANDIDATE"
-              break
-            fi
-          done
-
-          if [ -z "$ANDROID_APP" ]; then
-            ANDROID_APP=$(find . -type d -path "*/android/app" -not -path "*/build/*" | head -n 1)
-          fi
-
-          if [ -z "$ANDROID_APP" ] || [ ! -d "$ANDROID_APP" ]; then
-            echo "Folder android/app tidak ditemukan, skip ProGuard."
-            exit 0
-          fi
-
-          echo "Android app dir: $ANDROID_APP"
-          echo ""
-
-          PROGUARD_FILE="$ANDROID_APP/proguard-rules.pro"
-
-          cat > "$PROGUARD_FILE" << 'PROGUARD_EOF'
-          -keep class io.flutter.** { *; }
-          -keep class io.flutter.plugins.** { *; }
-          -keep class io.flutter.plugin.** { *; }
-          -keep class io.flutter.embedding.** { *; }
-          -keepattributes Signature
-          -keepattributes *Annotation*
-          -keepattributes InnerClasses
-          -keepattributes EnclosingMethod
-          -keepattributes SourceFile,LineNumberTable
-          -renamesourcefileattribute SourceFile
-          -keep class androidx.webkit.** { *; }
-          -keep class android.webkit.** { *; }
-          -keepclassmembers class * extends android.webkit.WebViewClient { *; }
-          -keepclassmembers class * extends android.webkit.WebChromeClient { *; }
-          -keep class com.google.android.gms.** { *; }
-          -dontwarn com.google.android.gms.**
-          -keep class dev.fluttercommunity.plus.connectivity.** { *; }
-          -keep class androidx.lifecycle.** { *; }
-          -keep class * extends androidx.lifecycle.LifecycleObserver { *; }
-          -keep class * extends androidx.lifecycle.ViewModel { *; }
-          -keep class androidx.core.** { *; }
-          -keep class androidx.annotation.** { *; }
-          -keep class kotlin.** { *; }
-          -keep class kotlinx.coroutines.** { *; }
-          -dontwarn kotlin.**
-          -dontwarn kotlinx.**
-          -keepclasseswithmembernames class * { native <methods>; }
-          -keep class * implements android.os.Parcelable {
-              public static final android.os.Parcelable$Creator *;
-          }
-          -keepclassmembers enum * {
-              public static **[] values();
-              public static ** valueOf(java.lang.String);
-          }
-          -dontwarn io.flutter.**
-          -dontwarn androidx.**
-          -dontwarn org.jetbrains.**
-          -dontwarn javax.annotation.**
-          PROGUARD_EOF
-
-          sed -i 's/^          //' "$PROGUARD_FILE"
-
-          echo "proguard-rules.pro dibuat"
-          echo ""
-
-          GRADLE_FILE=""
-          IS_KTS=false
-
-          if [ -f "$ANDROID_APP/build.gradle.kts" ]; then
-            GRADLE_FILE="$ANDROID_APP/build.gradle.kts"
-            IS_KTS=true
-          elif [ -f "$ANDROID_APP/build.gradle" ]; then
-            GRADLE_FILE="$ANDROID_APP/build.gradle"
-          fi
-
-          if [ -z "$GRADLE_FILE" ]; then
-            echo "build.gradle tidak ditemukan, skip."
-            exit 0
-          fi
-
-          echo "Editing: $GRADLE_FILE (kts=$IS_KTS)"
-          export GRADLE_FILE
-          export IS_KTS
-
-          python3 << 'PYEOF'
-import re, os, sys
-
-gradle_file = os.environ.get("GRADLE_FILE")
-is_kts = os.environ.get("IS_KTS", "false").lower() == "true"
-
-if not gradle_file or not os.path.exists(gradle_file):
-    print("Gradle file tidak ada, skip.")
-    sys.exit(0)
-
-with open(gradle_file, "r", encoding="utf-8") as f:
-    content = f.read()
-
-if is_kts:
-    inject = """
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-"""
-else:
-    inject = """
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-"""
-
-pattern = re.compile(
-    r"(buildTypess*{[sS]*?releases*{)([sS]*?)(
-s*})",
-    re.MULTILINE
-)
-
-match = pattern.search(content)
-
-if match:
-    start, body, end = match.group(1), match.group(2), match.group(3)
-
-    if is_kts:
-        body = re.sub(r"s*isMinifyEnableds*=s*w+", "", body)
-        body = re.sub(r"s*isShrinkResourcess*=s*w+", "", body)
-        body = re.sub(r"s*proguardFiless*([sS]*?)", "", body)
-    else:
-        body = re.sub(r"s*minifyEnableds+w+", "", body)
-        body = re.sub(r"s*shrinkResourcess+w+", "", body)
-        body = re.sub(r"s*proguardFiles[sS]*?(?=
-s*w|
-s*})", "", body)
-
-    new_content = content[:match.start()] + start + inject + body + end + content[match.end():]
-
-    with open(gradle_file, "w", encoding="utf-8") as f:
-        f.write(new_content)
-
-    print("build.gradle berhasil di-inject ProGuard!")
-else:
-    print("buildTypes/release tidak ditemukan, coba fallback...")
-
-    android_pattern = re.compile(r"(androids*{)", re.MULTILINE)
-    android_match = android_pattern.search(content)
-
-    if android_match:
-        if is_kts:
-            new_block = """
-    buildTypes {
-        release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-        }
-    }
-"""
-        else:
-            new_block = """
-    buildTypes {
-        release {
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-        }
-    }
-"""
-
-        pos = android_match.end()
-        new_content = content[:pos] + new_block + content[pos:]
-
-        with open(gradle_file, "w", encoding="utf-8") as f:
-            f.write(new_content)
-
-        print("Fallback: buildTypes ditambahkan manual")
-    else:
-        print("Blok android{} tidak ditemukan, gagal inject.")
-PYEOF
-
-          echo ""
-          echo "=== Inject Dart Hardening ==="
-          mkdir -p lib
-
-          cat > lib/app_hardening.dart << 'HARDEN_EOF'
-          import 'dart:io';
-          import 'package:flutter/foundation.dart';
-          import 'package:flutter/services.dart';
-
-          class AppHardening {
-            static bool _blocked = false;
-
-            static Future<void> init() async {
-              if (kDebugMode) return;
-
-              try {
-                if (Platform.isAndroid) {
-                  await _checkRootAndroid();
-                  await _checkEmulatorAndroid();
-                  await _checkHooksAndroid();
-                  await _checkDebuggerAndroid();
-                } else if (Platform.isIOS) {
-                  await _checkJailbreakIOS();
-                }
-              } catch (e) {
-                _blocked = true;
-              }
-
-              if (_blocked) {
-                await Future.delayed(const Duration(milliseconds: 200));
-                exit(0);
-              }
-            }
-
-            static Future<void> _checkRootAndroid() async {
-              final paths = [
-                '/system/app/Superuser.apk',
-                '/sbin/su',
-                '/system/bin/su',
-                '/system/xbin/su',
-                '/data/local/xbin/su',
-                '/data/local/bin/su',
-                '/system/sd/xbin/su',
-                '/system/bin/failsafe/su',
-                '/data/local/su',
-                '/su/bin/su',
-                '/magisk/.core/bin/su',
-              ];
-
-              for (final p in paths) {
-                if (await File(p).exists()) {
-                  _blocked = true;
-                  return;
-                }
-              }
-            }
-
-            static Future<void> _checkEmulatorAndroid() async {
-              const channel = MethodChannel('app_hardening');
-              try {
-                final isEmu = await channel.invokeMethod<bool>('isEmulator') ?? false;
-                if (isEmu) _blocked = true;
-              } catch (_) {}
-            }
-
-            static Future<void> _checkHooksAndroid() async {
-              final hookLibs = ['frida', 'xposed', 'substrate'];
-
-              try {
-                final maps = await File('/proc/self/maps').readAsString();
-                for (final h in hookLibs) {
-                  if (maps.toLowerCase().contains(h)) {
-                    _blocked = true;
-                    return;
-                  }
-                }
-              } catch (_) {}
-            }
-
-            static Future<void> _checkDebuggerAndroid() async {
-              try {
-                final status = await File('/proc/self/status').readAsString();
-                final lines = status.split('
-');
-                for (final l in lines) {
-                  if (l.startsWith('TracerPid:')) {
-                    final pid = l.split(':')[1].trim();
-                    if (pid != '0') _blocked = true;
-                  }
-                }
-              } catch (_) {}
-            }
-
-            static Future<void> _checkJailbreakIOS() async {
-              final paths = [
-                '/Applications/Cydia.app',
-                '/Library/MobileSubstrate/MobileSubstrate.dylib',
-                '/bin/bash',
-                '/usr/sbin/sshd',
-                '/etc/apt',
-                '/private/var/lib/apt/',
-              ];
-
-              for (final p in paths) {
-                if (await File(p).exists()) {
-                  _blocked = true;
-                  return;
-                }
-              }
-            }
-          }
-          HARDEN_EOF
-
-          sed -i 's/^          //' lib/app_hardening.dart
-
-          cat > lib/secure_string.dart << 'SECSTR_EOF'
-          class SecureString {
-            static final Map<String, String> _cache = {};
-
-            static String decode(List<int> keys, List<int> seeds) {
-              final cacheKey = keys.join(',') + ':' + seeds.join(',');
-              if (_cache.containsKey(cacheKey)) return _cache[cacheKey]!;
-
-              final buf = StringBuffer();
-              for (int i = 0; i < keys.length; i++) {
-                final k = (keys[i] ^ seeds[i % seeds.length]) & 0xFF;
-                buf.writeCharCode(k);
-              }
-
-              final result = buf.toString();
-              _cache[cacheKey] = result;
-              return result;
-            }
-
-            static List<int> encode(String plain, List<int> seeds) {
-              final result = <int>[];
-              for (int i = 0; i < plain.length; i++) {
-                result.add((plain.codeUnitAt(i) ^ seeds[i % seeds.length]) & 0xFF);
-              }
-              return result;
-            }
-          }
-          SECSTR_EOF
-
-          sed -i 's/^          //' lib/secure_string.dart
-
-          echo "lib/app_hardening.dart dan lib/secure_string.dart dibuat"
-          echo ""
-
-          echo "=== Inject main.dart hook ==="
-          if [ -f lib/main.dart ]; then
-            if ! grep -q "AppHardening" lib/main.dart; then
-              python3 << 'MAINPYEOF'
-import re
-
-path = "lib/main.dart"
-with open(path, "r", encoding="utf-8") as f:
-    content = f.read()
-
-if "import 'app_hardening.dart';" not in content:
-    content = "import 'app_hardening.dart';
-" + content
-
-pattern = re.compile(r"(voids+mains*(s*)s*(?:asyncs*)?{)")
-
-match = pattern.search(content)
-
-if match:
-    pos = match.end()
-    prefix = content[:pos]
-    suffix = content[pos:]
-    content = prefix + "
-  AppHardening.init();" + suffix
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    print("main.dart di-inject AppHardening.init()")
-else:
-    print("Pola void main() tidak ditemukan, skip inject")
-MAINPYEOF
-            else
-              echo "AppHardening sudah ada di main.dart, skip."
-            fi
-          fi
-
-          echo ""
-          echo "=== VERIFIKASI build.gradle ==="
-          grep -A 8 "release {" "$GRADLE_FILE" | head -n 15
-          echo ""
-          echo "PROGUARD + HARDENING AKTIF!"
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ -f "pubspec.yaml" ]; then
-            echo "=== Build APK (ProGuard + Hardening) ==="
-            flutter clean
-            flutter build apk --${{ github.event.inputs.build_type }}
-
-            echo ""
-            echo "=== Cek mapping.txt ==="
-            MAPPING=$(find . -name "mapping.txt" -path "*release*" 2>/dev/null | head -n 1)
-            if [ -n "$MAPPING" ]; then
-              echo "ProGuard mapping.txt: $MAPPING"
-              echo "PROGUARD_MAPPING=$MAPPING" >> $GITHUB_ENV
-            else
-              echo "mapping.txt tidak ditemukan."
-            fi
-          else
-            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
-            GRADLE_DIR=$(dirname "$GRADLE_PATH")
-            cd "$GRADLE_DIR" && chmod +x gradlew
-            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              ./gradlew assembleDebug
-            else
-              ./gradlew assembleRelease
-            fi
-          fi
+          echo "=== BUILD APK ==="
+          flutter build apk --${{ github.event.inputs.build_type }}
 
       - name: Check APK Output
         run: |
           APK_FOUND=$(find $GITHUB_WORKSPACE -name "*.apk" | head -n 1)
+          if [ -z "$APK_FOUND" ]; then
+            echo "❌ APK tidak ditemukan!"
+            exit 1
+          fi
           APK_PATH=$(echo "$APK_FOUND" | sed "s|$GITHUB_WORKSPACE/||")
           echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> $GITHUB_ENV
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          ls -lh "$APK_FOUND"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -550,15 +300,3 @@ MAINPYEOF
           path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
           retention-days: 1
           if-no-files-found: error
-
-      - name: Upload ProGuard Mapping File
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: proguard-mapping-${{ github.event.inputs.tag }}
-          path: |
-            ${{ env.PROJECT_DIR }}/**/mapping.txt
-            ${{ env.PROJECT_DIR }}/**/seeds.txt
-            ${{ env.PROJECT_DIR }}/**/usage.txt
-          retention-days: 30
-          if-no-files-found: ignore
