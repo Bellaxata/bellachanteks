@@ -24,7 +24,6 @@ jobs:
     timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.configureondemand=true"
 
     steps:
       - name: Setup Node.js
@@ -38,13 +37,11 @@ jobs:
           echo "URL: ${{ github.event.inputs.zip_url }}"
 
           curl -L \
-            --retry 3 --retry-delay 2 --retry-connrefused \
-            --compressed \
             -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip \
-            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n=== Size: %{size_download} bytes ===\n"
+            -w "\n=== HTTP Status: %{http_code} ===\n=== Final URL: %{url_effective} ===\n"
 
           echo ""
           echo "=== File Info ==="
@@ -52,22 +49,27 @@ jobs:
           echo ""
           echo "=== File Type ==="
           file project.zip
+          echo ""
+          echo "=== First Bytes ==="
+          xxd project.zip | head -2
 
-      - name: Extract ZIP (auto-decompress)
+      - name: Extract ZIP
         run: |
           echo "=== Validating ZIP ==="
           if ! unzip -t project.zip > /dev/null 2>&1; then
             echo "File bukan ZIP valid!"
+            echo ""
+            echo "=== Isi file ==="
             cat project.zip
             exit 1
           fi
           echo "ZIP valid"
 
           echo ""
-          echo "=== Extracting ZIP (unzip parallel-friendly) ==="
+          echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
-          rm -f project.zip
 
+          echo ""
           echo "=== Mengunci Project Dir ==="
           SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
           FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
@@ -84,24 +86,6 @@ jobs:
         with:
           distribution: "temurin"
           java-version: "17"
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: Cache Pub
-        uses: actions/cache@v4
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            pub-${{ runner.os }}-
 
       - name: Setup Flutter
         uses: subosito/flutter-action@main
@@ -129,35 +113,26 @@ jobs:
         if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: exit 1
 
-      - name: Get dependencies (fast)
+      - name: Get dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            if [ -d ".dart_tool" ] && [ -f "pubspec.lock" ]; then
-              echo "Cache .dart_tool ada, skip flutter pub get"
-              flutter pub get --offline || flutter pub get
-            else
-              timeout 120s flutter pub get || echo "Lanjut..."
-            fi
+            timeout 120s flutter pub get || echo "Lanjut..."
           fi
 
-      - name: Build APK (optimized)
+      - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           if [ -f "pubspec.yaml" ]; then
-            if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              flutter build apk --debug --no-tree-shake-icons
-            else
-              flutter build apk --release --split-per-abi
-            fi
+            flutter build apk --${{ github.event.inputs.build_type }}
           else
             GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
             GRADLE_DIR=$(dirname "$GRADLE_PATH")
             cd "$GRADLE_DIR" && chmod +x gradlew
             if [ "${{ github.event.inputs.build_type }}" = "debug" ]; then
-              ./gradlew assembleDebug --parallel --daemon
+              ./gradlew assembleDebug
             else
-              ./gradlew assembleRelease --parallel --daemon
+              ./gradlew assembleRelease
             fi
           fi
 
